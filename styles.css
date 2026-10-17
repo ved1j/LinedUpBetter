@@ -201,3 +201,72 @@ details.adv > summary h3 { margin: 0; }
 details.adv > summary h3::before { content: "+"; color: var(--volt); margin-right: 2px; }
 details.adv[open] > summary h3::before { content: "–"; }
 details.adv[open] > summary { margin-bottom: 12px; }
+
+/* ---------- team picker */
+.ctx { gap: 6px; }
+.starbtn { background: none; border: 0; color: var(--muted); font-size: 17px; line-height: 1; cursor: pointer; padding: 2px 3px; }
+.starbtn:hover, .starbtn.on { color: var(--volt); }
+.teamsel { max-width: 190px; font-weight: 600; background: transparent; border-color: transparent; padding: 4px 6px; font-size: 13px; }
+.teamsel:hover { border-color: var(--line-2); }
+.ghostpill { background: none; border: 1px solid var(--volt); color: var(--volt); }
+.lgname { max-width: 130px; }
+nav { gap: 18px; overflow-x: auto; scrollbar-width: none; }
+nav button { white-space: nowrap; font-size: 12.5px; }
+
+/* ---------- players: stars, notes, links */
+.pn[data-player] { cursor: pointer; }
+.pn[data-player]:hover { color: var(--volt); }
+.star { color: var(--volt); margin-left: 5px; font-size: 11px; }
+.has-note { color: var(--muted); margin-left: 5px; font-size: 11px; }
+.tlink { background: none; border: 0; padding: 0; color: inherit; font: inherit; font-weight: 600; cursor: pointer; text-align: left; }
+.tlink:hover { color: var(--volt); }
+.note-cell { white-space: normal; max-width: 260px; color: var(--muted); font-size: 12px; line-height: 1.4; }
+
+/* ---------- league rules */
+.rk-label { display: block; font-family: var(--display); font-weight: 700; font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 12px 0 7px; }
+.rk-label:first-of-type { margin-top: 0; }
+.rules { display: flex; flex-wrap: wrap; gap: 5px; }
+.rule { display: inline-flex; gap: 6px; align-items: baseline; background: var(--surface-2); border-radius: 5px; padding: 3px 8px; font-variant-numeric: tabular-nums; color: var(--volt); font-weight: 600; font-size: 12px; }
+.rule b { color: var(--text); font-family: var(--display); font-weight: 700; letter-spacing: .06em; font-size: 11px; }
+.rule.neg { color: var(--bad); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 1px; background: var(--line); border-radius: 8px; overflow: hidden; margin: 12px 0; }
+.facts > div { background: var(--surface); padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
+.facts .k { font-family: var(--display); font-weight: 600; font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.facts .v { font-family: var(--display); font-weight: 700; font-size: 17px; }
+.rounds { list-style: none; margin: 0; padding: 0; }
+.rounds li { padding: 5px 0; border-top: 1px solid var(--line); font-size: 12px; }
+.rounds li:first-child { border-top: 0; }
+.warnline { color: var(--warn); font-size: 12px; margin: 0 0 10px; }
+
+/* ---------- scoreboard list */
+.board-list { display: flex; flex-direction: column; }
+.mrow { display: grid; grid-template-columns: 1fr 64px 150px 64px 1fr; align-items: center; gap: 10px; padding: 9px 8px; border-top: 1px solid var(--line); border-radius: 6px; }
+.mrow:first-child { border-top: 0; }
+.mrow.me { background: var(--volt-soft); }
+.mrow .tlink, .mrow > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mrow .r { text-align: right; }
+.sc { display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
+.sc b { font-family: var(--display); font-weight: 800; font-size: 20px; line-height: 1; }
+.sc small { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.sc.r { align-items: flex-end; }
+.wpm { display: flex; align-items: center; gap: 6px; font-family: var(--display); font-weight: 700; font-size: 12px; color: var(--muted); }
+.wpm .bar { flex: 1; height: 3px; background: rgba(255, 255, 255, .1); border-radius: 2px; overflow: hidden; }
+.wpm .bar i { display: block; height: 100%; background: var(--volt); }
+.res { display: inline-block; width: 16px; font-family: var(--display); font-weight: 800; }
+.res.w { color: var(--good); }
+.res.l { color: var(--bad); }
+tr.done td { color: var(--muted); }
+
+/* ---------- player drawer */
+.scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); z-index: 10; }
+.drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(360px, 92vw); background: var(--surface); border-left: 1px solid var(--line-2); z-index: 11; padding: 16px 18px; overflow: auto; display: flex; flex-direction: column; gap: 12px; animation: slide .18s ease-out; }
+@keyframes slide { from { transform: translateX(24px); opacity: 0; } }
+.dh { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.dn { font-family: var(--display); font-weight: 800; font-size: 24px; text-transform: uppercase; line-height: 1.05; }
+.drawer .btn { align-self: flex-start; }
+.drawer .facts { margin: 0; }
+.drawer .rk-label { margin: 4px 0 -4px; }
+textarea { width: 100%; background: var(--bg); border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 11px; color: var(--text); font: inherit; font-size: 13px; line-height: 1.45; resize: vertical; }
+textarea:focus { outline: none; border-color: var(--volt); }
+.drawer .facts { grid-template-columns: repeat(3, 1fr); }
+.card .facts { grid-template-columns: repeat(2, 1fr); }

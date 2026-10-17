@@ -81,6 +81,55 @@ function erf(x) {
 }
 const phi = z => 0.5 * (1 + erf(z / Math.SQRT2));
 
+// Days of a matchup that still count toward a projection.
+export function daysLeft(m, period) {
+  const all = m.periods[period] || [];
+  if (period < m.currentPeriod) return [];
+  return period === m.currentPeriod ? all.filter(sp => sp >= m.currentSP) : all;
+}
+
+// Projected final score for any matchup: points already scored + best-lineup projection
+// for the days left, using each team's current roster.
+export function projectMatchup(m, period, home, away, basis, homePts = 0, awayPts = 0) {
+  const days = daysLeft(m, period);
+  const h = projectDays(m, home.roster, days, basis);
+  const a = away ? projectDays(m, away.roster, days, basis) : { total: 0, games: 0 };
+  const hp = homePts + h.total, ap = awayPts + a.total;
+  // Uncertainty: ~12.5 FP per player-game of noise, plus ~6% for lineup/minutes changes.
+  const sd = Math.sqrt((h.games + a.games) * 160 + (0.06 * (h.total + a.total)) ** 2) + 5;
+  const winProb = days.length ? phi((hp - ap) / sd) : (hp > ap ? 1 : hp < ap ? 0 : 0.5);
+  return { homeProj: hp, awayProj: ap, homeGames: h.games, awayGames: a.games, winProb, final: !days.length };
+}
+
+// Every matchup in a period, with live score and projection.
+export function scoreboard(m, period, basis) {
+  const team = id => m.teams.find(t => t.id === id);
+  return m.matchups.filter(x => x.period === period && x.home).map(x => {
+    const home = team(x.home.teamId), away = x.away && team(x.away.teamId);
+    return { period, home, away, homePts: x.home.pts, awayPts: x.away?.pts ?? 0, winner: x.winner,
+      ...projectMatchup(m, period, home, away, basis, x.home.pts, x.away?.pts ?? 0) };
+  });
+}
+
+// One team's full schedule from its point of view: results, live week, projections.
+export function teamSchedule(m, teamId, basis) {
+  const team = id => m.teams.find(t => t.id === id);
+  const me = team(teamId);
+  return m.matchups
+    .filter(x => x.home?.teamId === teamId || x.away?.teamId === teamId)
+    .sort((a, b) => a.period - b.period)
+    .map(x => {
+      const home = x.home?.teamId === teamId;
+      const mine = home ? x.home : x.away, theirs = home ? x.away : x.home;
+      const opp = theirs && team(theirs.teamId);
+      const myPts = mine?.pts ?? 0, oppPts = theirs?.pts ?? 0;
+      const pr = projectMatchup(m, x.period, me, opp, basis, myPts, oppPts);
+      const won = x.winner === 'UNDECIDED' || !x.winner ? null : (x.winner === (home ? 'HOME' : 'AWAY'));
+      return { period: x.period, opp, myPts, oppPts, myProj: pr.homeProj, oppProj: pr.awayProj,
+        winProb: opp ? pr.winProb : null, done: x.period < m.currentPeriod, won, tie: x.winner === 'TIE' };
+    });
+}
+
 export function analyze(m, basis = 'smart') {
   const team = id => m.teams.find(t => t.id === id);
   const my = team(m.myTeamId) || m.teams[0];
@@ -95,14 +144,10 @@ export function analyze(m, basis = 'smart') {
     const theirs = mine === mu.home ? mu.away : mu.home;
     const opp = theirs && team(theirs.teamId);
     if (opp) {
-      const oppRem = projectDays(m, opp.roster, rem, basis);
-      const myProj = mine.pts + base.total;
-      const oppProj = theirs.pts + oppRem.total;
-      const sd = Math.sqrt(base.games + oppRem.games) * 9 + 8;
+      const pr = projectMatchup(m, m.currentPeriod, my, opp, basis, mine.pts, theirs.pts);
       matchup = {
-        opp, myPts: mine.pts, oppPts: theirs.pts, myProj, oppProj,
-        myGames: base.games, oppGames: oppRem.games,
-        winProb: rem.length ? phi((myProj - oppProj) / sd) : (mine.pts > theirs.pts ? 1 : mine.pts < theirs.pts ? 0 : 0.5),
+        opp, myPts: mine.pts, oppPts: theirs.pts, myProj: pr.homeProj, oppProj: pr.awayProj,
+        myGames: pr.homeGames, oppGames: pr.awayGames, winProb: pr.winProb,
       };
     } else matchup = { bye: true };
   }

@@ -16,6 +16,13 @@ export const SLOT = {
 const POS = { 1: 'PG', 2: 'SG', 3: 'SF', 4: 'PF', 5: 'C' };
 const SPLIT = { 0: 'season', 1: 'l7', 2: 'l15', 3: 'l30' };
 const GP_STAT = '42';
+export const STAT_NAMES = {
+  0: 'PTS', 1: 'BLK', 2: 'STL', 3: 'AST', 4: 'OREB', 5: 'DREB', 6: 'REB', 7: 'EJ', 8: 'FF', 9: 'PF',
+  10: 'TF', 11: 'TO', 12: 'DQ', 13: 'FGM', 14: 'FGA', 15: 'FTM', 16: 'FTA', 17: '3PM', 18: '3PA',
+  19: 'FG%', 20: 'FT%', 21: '3P%', 37: 'DD', 38: 'TD', 39: 'QD', 40: 'MIN', 41: 'GS', 42: 'GP',
+};
+// ESPN's standard points-league scoring, used when a league scores by categories.
+export const DEFAULT_POINTS = { 0: 1, 17: 1, 14: -1, 13: 2, 16: -1, 15: 1, 6: 1, 3: 2, 2: 4, 1: 4, 11: -2 };
 
 export class EspnError extends Error {
   constructor(kind, message) { super(message); this.kind = kind; }
@@ -79,8 +86,14 @@ function shiftISO(iso, days) {
 
 function normalize(L, P, F, season, leagueId) {
   const S = L.settings || {};
+  // Score players with the league's own points per stat. Category leagues get ESPN's
+  // standard points scoring as an estimate.
+  const scoringType = S.scoringSettings?.scoringType || 'H2H_POINTS';
+  const items = S.scoringSettings?.scoringItems || [];
+  const isPoints = /POINTS/.test(scoringType) && items.length > 0;
   const pts = {};
-  for (const it of S.scoringSettings?.scoringItems || []) pts[it.statId] = it.points;
+  if (isPoints) for (const it of items) pts[it.statId] = (pts[it.statId] || 0) + it.points;
+  else Object.assign(pts, DEFAULT_POINTS);
   const slotCounts = S.rosterSettings?.lineupSlotCounts || {};
   const starters = Object.entries(slotCounts)
     .filter(([k]) => +k !== 12 && +k !== 13)
@@ -157,6 +170,11 @@ function normalize(L, P, F, season, leagueId) {
     starters,
     slotCounts,
     acqLimit: S.acquisitionSettings?.matchupAcquisitionLimit ?? -1,
+    scoringType,
+    pointsEstimate: !isPoints,
+    scoring: Object.entries(pts).map(([statId, points]) => ({ statId: +statId, points })).filter(x => x.points),
+    playoffRoundLength: sched.playoffMatchupPeriodLength || 1,
+    playoffSeeding: sched.playoffSeedingRule || '',
     day1,
     teams,
     matchups,
@@ -225,10 +243,13 @@ function normPlayer(p, { slot = null, status = null, season, pts }) {
     else if (s.seasonId === season - 1 && s.statSourceId === 0 && s.statSplitTypeId === 0) key = 'prev';
     if (!key || stats[key]) continue;
     const gp = s.stats?.[GP_STAT] || 0;
-    let avg = s.appliedAverage;
-    if (avg == null && s.averageStats) {
+    // Compute from per-game averages with the league's scoring when we can, so every
+    // number matches this league's rules; ESPN's own appliedAverage is the fallback.
+    let avg = null;
+    if (s.averageStats && Object.keys(s.averageStats).length) {
       avg = Object.entries(s.averageStats).reduce((a, [k, v]) => a + (pts[k] || 0) * v, 0);
     }
+    if (avg == null) avg = s.appliedAverage ?? null;
     if (avg == null && s.appliedTotal != null && gp) avg = s.appliedTotal / gp;
     if (avg == null || (key !== 'proj' && !gp && !avg)) continue;
     stats[key] = { avg: Math.round(avg * 10) / 10, gp };

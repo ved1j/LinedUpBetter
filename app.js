@@ -1,4 +1,4 @@
-import { loadLeague, setTransport, PRO_ABBR, SLOT } from './api.js';
+import { loadLeague, setTransport, PRO_ABBR, SLOT, STAT_NAMES } from './api.js';
 import { makeDemo } from './demo.js';
 import * as A from './analysis.js';
 
@@ -19,11 +19,15 @@ document.body.classList.toggle('full', full);
 
 const defaultSeason = () => { const d = new Date(); return d.getMonth() >= 7 ? d.getFullYear() + 1 : d.getFullYear(); };
 const CACHE_MS = 10 * 60 * 1000;
-const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['waivers', 'Waivers'], ['playoffs', 'Playoffs'], ['league', 'League'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['waivers', 'Waivers'], ['playoffs', 'Playoffs'], ['watchlist', 'Watchlist'], ['league', 'League'], ['settings', 'Settings']];
 
 const state = {
-  settings: { leagueId: '', season: defaultSeason(), teamId: null, basis: 'smart', demo: false },
+  settings: { leagueId: '', season: defaultSeason(), teamId: null, basis: 'smart', demo: false, starred: {} },
   model: null, an: null, tab: 'overview', loading: false, error: null, signedIn: null,
+  viewId: null,      // team whose perspective we're showing
+  pnotes: {},        // { playerId: { star: bool, note: string } } for this league
+  index: new Map(),  // playerId -> { p, ownerId }
+  openPlayer: null,
   wv: { pos: 'ALL', sort: 'score', showInjured: false },
 };
 
@@ -34,6 +38,13 @@ const f1 = n => (n == null ? '–' : (+n).toFixed(1));
 const val = p => A.value(p, state.settings.basis);
 const abbr = p => state.model.proTeams[p.proTeamId]?.abbrev || PRO_ABBR[p.proTeamId] || 'FA';
 const teamName = id => state.model.teams.find(t => t.id === id)?.name || `Team ${id}`;
+const leagueKey = () => (state.settings.demo ? 'demo' : `${state.settings.leagueId}:${state.settings.season}`);
+const starredTeam = () => state.settings.starred?.[leagueKey()] ?? null;
+const isStar = id => !!state.pnotes[id]?.star;
+const noteOf = id => state.pnotes[id]?.note || '';
+const savePNotes = () => store.set(`pnotes:${leagueKey()}`, state.pnotes);
+const pct = x => `${Math.min(99, Math.max(1, Math.round(x * 100)))}%`;
+const STAR = '<span class="star" title="Starred">★</span>';
 
 function badge(p) {
   const map = { OUT: ['O', 'b-out'], INJURY_RESERVE: ['IR', 'b-out'], SUSPENSION: ['SSPD', 'b-out'], DAY_TO_DAY: ['DTD', 'b-dtd'], QUESTIONABLE: ['Q', 'b-dtd'] };
@@ -42,7 +53,8 @@ function badge(p) {
 }
 function pCell(p, extra = '') {
   const pos = p.eligible?.length ? p.eligible.join('/') : p.pos;
-  return `<div class="pl"><span class="pn">${esc(p.name)}${badge(p)}${extra}</span><span class="pm">${esc(abbr(p))} · ${esc(pos)}</span></div>`;
+  const marks = (isStar(p.id) ? STAR : '') + (noteOf(p.id) ? '<span class="has-note" title="Has notes">✎</span>' : '');
+  return `<div class="pl"><span class="pn" data-player="${p.id}" title="Notes & details">${esc(p.name)}${marks}${badge(p)}${extra}</span><span class="pm">${esc(abbr(p))} · ${esc(pos)}</span></div>`;
 }
 const trendCell = t => (t == null ? '<td class="num muted">–</td>' : `<td class="num ${t >= 1.5 ? 'up' : t <= -1.5 ? 'down' : 'muted'}">${t > 0 ? '+' : ''}${t.toFixed(1)}</td>`);
 
@@ -176,12 +188,16 @@ async function load(force = false) {
         await store.set(key, { at: Date.now(), model });
       }
     }
-    let tid = s.demo ? model.myTeamId : s.teamId;
-    if (!model.teams.some(t => t.id === +tid)) {
+    // Main team: the one you starred, else your ESPN login's team, else the first team.
+    const has = id => id != null && model.teams.some(t => t.id === +id);
+    let tid = starredTeam() ?? (s.demo ? model.myTeamId : s.teamId);
+    if (!has(tid)) {
       const sw = (await swid())?.toLowerCase();
       tid = (sw && model.teams.find(t => t.owners?.some(o => String(o).toLowerCase() === sw))?.id) ?? model.teams[0]?.id;
     }
-    model.myTeamId = +tid;
+    if (!has(state.viewId) || state.loadedKey !== leagueKey()) state.viewId = +tid;
+    state.loadedKey = leagueKey();
+    state.pnotes = (await store.get(`pnotes:${leagueKey()}`)) || {};
     state.model = model;
     reanalyze();
     if (state.tab === 'settings' && !state.stayOnSettings) state.tab = 'overview';
@@ -194,7 +210,15 @@ async function load(force = false) {
   state.loading = false;
   render();
 }
-function reanalyze() { state.an = state.model ? A.analyze(state.model, state.settings.basis) : null; }
+function reanalyze() {
+  const m = state.model;
+  if (!m) { state.an = null; return; }
+  m.myTeamId = state.viewId;
+  state.an = A.analyze(m, state.settings.basis);
+  state.index = new Map();
+  for (const t of m.teams) for (const p of t.roster) state.index.set(p.id, { p, ownerId: t.id });
+  for (const p of m.freeAgents) if (!state.index.has(p.id)) state.index.set(p.id, { p, ownerId: null });
+}
 async function saveSettings() { await store.set('settings', state.settings); }
 
 // ---------- views
@@ -203,13 +227,28 @@ function vHeader() {
   const opts = Object.entries(A.BASIS).map(([k, v]) => `<option value="${k}" ${k === state.settings.basis ? 'selected' : ''}>${v}</option>`).join('');
   return `<header>
     <div class="brand"><span class="mark" aria-hidden="true"></span><span class="wm">LinedUp<em>Better</em></span></div>
-    ${m ? `<div class="ctx"><span>${esc(state.an.my.name)}</span><span class="sep">/</span><span class="muted">${esc(m.name)}</span>${m.demo ? '<span class="pill" data-tab="settings" title="Connect your league in Settings">Sample data</span>' : ''}</div>` : ''}
+    ${m ? vTeamPicker() : ''}
     <div class="spacer"></div>
     ${m ? `<label class="basis"><span>FP/G</span><select data-act="basis" title="How player value is calculated">${opts}</select></label>` : ''}
     <button class="ghost" data-act="refresh" title="Refresh from ESPN" aria-label="Refresh">${ICON.refresh}</button>
     ${isExt && !full ? `<button class="ghost" data-act="expand" title="Open in a full tab" aria-label="Open full view">${ICON.expand}</button>` : ''}
   </header>
   <nav>${TABS.map(([k, v]) => `<button data-tab="${k}" class="${state.tab === k ? 'on' : ''}">${v}</button>`).join('')}</nav>`;
+}
+
+function vTeamPicker() {
+  const m = state.model;
+  const main = starredTeam() ?? null;
+  const viewing = state.viewId;
+  const isMain = main === viewing;
+  const opts = m.teams.map(t => `<option value="${t.id}" ${t.id === viewing ? 'selected' : ''}>${t.id === main ? '★ ' : ''}${esc(t.name)}</option>`).join('');
+  return `<div class="ctx">
+    <button class="starbtn ${isMain ? 'on' : ''}" data-act="star-team" title="${isMain ? 'This is your main team (opens first)' : 'Make this your main team (opens first)'}" aria-label="Star team">${isMain ? '★' : '☆'}</button>
+    <select class="teamsel" data-act="view" title="See the league from any team's point of view">${opts}</select>
+    ${main != null && !isMain ? '<button class="pill ghostpill" data-act="home" title="Back to your starred team">My team</button>' : ''}
+    <span class="sep">/</span><span class="muted lgname">${esc(m.name)}</span>
+    ${m.demo ? '<span class="pill" data-tab="settings" title="Connect your league in Settings">Sample data</span>' : ''}
+  </div>`;
 }
 
 const ICON = {
@@ -292,7 +331,7 @@ function vRoster() {
     const cls = d.open ? 'under' : d.benched ? 'over' : '';
     return `<td class="day"><span class="cnt ${cls}" title="${d.playing} playing / ${m.starters} slots">${d.playing}/${m.starters}</span></td>`;
   }).join('');
-  return `<section class="card"><h3>My roster · week ${m.currentPeriod} <span class="r muted small">${A.periodRange(m, m.currentPeriod)}${all.length > 7 ? ` · showing ${A.fmtMD(A.spDate(m, sps[0]))} – ${A.fmtMD(A.spDate(m, sps[sps.length - 1]))}` : ''}</span></h3>
+  return `<section class="card"><h3>${esc(an.my.name)} · week ${m.currentPeriod} <span class="r muted small">${A.periodRange(m, m.currentPeriod)}${all.length > 7 ? ` · showing ${A.fmtMD(A.spDate(m, sps[0]))} – ${A.fmtMD(A.spDate(m, sps[sps.length - 1]))}` : ''}</span></h3>
     <div class="scrollx"><table>
       <thead><tr><th>Slot</th><th>Player</th><th class="num" title="${A.BASIS[state.settings.basis]}">FP/G</th><th class="num">Season</th><th class="num">L15</th><th class="num">Δ</th><th class="num" title="Games left in this matchup">GL</th>${dayHead}</tr></thead>
       <tbody>${rows}</tbody>
@@ -363,11 +402,11 @@ function vPlayoffs() {
 
   const stash = an.waivers.filter(w => !A.isOut(w.p)).map(w => ({ ...w, poPts: w.v * w.poGames })).sort((a, b) => b.poPts - a.poPts).slice(0, 8);
 
-  return `<section class="card"><h3>Your roster in the fantasy playoffs <span class="r muted small">Highlighted = more games than usual</span></h3>
+  return `<section class="card"><h3>${esc(an.my.name)} in the fantasy playoffs <span class="r muted small">Highlighted = more games than usual</span></h3>
       <div class="scrollx"><table><thead><tr><th>Player</th>${head}<th class="num">Total</th><th class="num">Proj FP</th></tr></thead><tbody>${myRows}</tbody></table></div></section>
     <div class="grid2">
       <section class="card"><h3>NBA games by playoff round</h3>
-        <div class="scrollx"><table><thead><tr><th>Team</th>${head}<th class="num">Tot</th><th>Your guys</th></tr></thead><tbody>${nbaRows}</tbody></table></div></section>
+        <div class="scrollx"><table><thead><tr><th>Team</th>${head}<th class="num">Tot</th><th>Roster</th></tr></thead><tbody>${nbaRows}</tbody></table></div></section>
       <section class="card"><h3>Playoff stash targets <span class="r muted small">FP/G × playoff games</span></h3>
         ${stash.map(w => `<div class="pick">${pCell(w.p)}<div class="num small muted">${f1(w.v)} FP/G<br>${w.poGames} PO games</div><div class="gain">${f0(w.poPts)}</div></div>`).join('')}
         <p class="muted small">Grab these a couple of weeks before the trade deadline / playoffs while they're cheap.</p></section>
@@ -382,39 +421,134 @@ function vLeague() {
   const { an, model: m } = state;
   const st = standings();
   const lead = st[0];
+  const main = starredTeam();
   const rows = st.map((t, i) => {
     const gb = ((lead.wins - t.wins) + (t.losses - lead.losses)) / 2;
     const cls = [t.id === an.my.id ? 'me' : '', i + 1 === m.playoffTeamCount ? 'line' : ''].join(' ');
-    return `<tr class="${cls}"><td class="num muted">${i + 1}</td><td><b>${esc(t.name)}</b></td><td class="num">${t.wins}-${t.losses}${t.ties ? '-' + t.ties : ''}</td><td class="num">${gb ? gb.toFixed(1) : '–'}</td><td class="num">${f0(t.pf)}</td><td class="num">${f0(t.pa)}</td></tr>`;
+    return `<tr class="${cls}"><td class="num muted">${i + 1}</td><td><button class="tlink" data-view="${t.id}" title="View as this team">${t.id === main ? '<span class="star">★</span> ' : ''}${esc(t.name)}</button></td><td class="num">${t.wins}-${t.losses}${t.ties ? '-' + t.ties : ''}</td><td class="num">${gb ? gb.toFixed(1) : '–'}</td><td class="num">${f0(t.pf)}</td><td class="num">${f0(t.pa)}</td></tr>`;
+  }).join('');
+  return `<div class="grid2">
+    <section class="card"><h3>Standings <span class="r muted small">click a team to view as them · dashed = playoff cut</span></h3>
+      <table><thead><tr><th class="num">#</th><th>Team</th><th class="num">W-L</th><th class="num">GB</th><th class="num">PF</th><th class="num">PA</th></tr></thead><tbody>${rows}</tbody></table></section>
+    ${vRules()}
+  </div>`;
+}
+
+function vRules() {
+  const m = state.model;
+  const scoring = (m.scoring || []).slice().sort((a, b) => Math.abs(b.points) - Math.abs(a.points));
+  const chips = scoring.map(x => `<span class="rule ${x.points < 0 ? 'neg' : ''}"><b>${esc(STAT_NAMES[x.statId] || 'Stat ' + x.statId)}</b>${x.points > 0 ? '+' : ''}${+x.points.toFixed(2)}</span>`).join('');
+  const slotCounts = Object.entries(m.slotCounts || {}).filter(([, n]) => n > 0).map(([k, n]) => `${SLOT[k] || k}${n > 1 ? '×' + n : ''}`).join(', ');
+  const po = A.playoffPeriods(m);
+  const rounds = po.map((id, i) => `<li><b>Round ${i + 1}</b> <span class="muted">${A.periodRange(m, id)} · ${(m.periods[id] || []).length} days</span></li>`).join('');
+  return `<section class="card"><h3>League rules <span class="r muted small">what every projection here uses</span></h3>
+    ${m.pointsEstimate ? `<p class="warnline">This league scores by categories (${esc(m.scoringType)}). Values below use ESPN's standard points scoring as an estimate.</p>` : ''}
+    <div class="rk-label">Points per stat</div><div class="rules">${chips || '<span class="muted">No scoring found.</span>'}</div>
+    <div class="facts">
+      <div><span class="k">Starters / day</span><span class="v">${m.starters}</span></div>
+      <div><span class="k">Regular season</span><span class="v">${m.regularPeriods} matchups</span></div>
+      <div><span class="k">Playoff teams</span><span class="v">${m.playoffTeamCount}</span></div>
+      <div><span class="k">Adds / matchup</span><span class="v">${m.acqLimit > 0 ? m.acqLimit : 'No limit'}</span></div>
+    </div>
+    <div class="rk-label">Lineup</div><p class="small" style="margin:0 0 10px">${esc(slotCounts) || '–'}</p>
+    ${rounds ? `<div class="rk-label">Playoff rounds</div><ul class="rounds">${rounds}</ul>` : ''}
+  </section>`;
+}
+
+function vMatchups() {
+  const { an, model: m } = state;
+  const b = state.settings.basis;
+  const me = an.my.id;
+  const board = A.scoreboard(m, m.currentPeriod, b);
+  const live = board.map(x => {
+    const mine = x.home.id === me || x.away?.id === me;
+    return `<div class="mrow ${mine ? 'me' : ''}">
+      <button class="tlink l" data-view="${x.home.id}">${esc(x.home.name)}</button>
+      <div class="sc"><b>${f0(x.homePts)}</b><small>proj ${f0(x.homeProj)}</small></div>
+      <div class="wpm"><span>${x.away ? pct(x.winProb) : ''}</span><div class="bar"><i style="width:${(x.winProb * 100).toFixed(0)}%"></i></div><span>${x.away ? pct(1 - x.winProb) : ''}</span></div>
+      <div class="sc r"><b>${x.away ? f0(x.awayPts) : '–'}</b><small>${x.away ? 'proj ' + f0(x.awayProj) : 'bye'}</small></div>
+      ${x.away ? `<button class="tlink r" data-view="${x.away.id}">${esc(x.away.name)}</button>` : '<span class="muted r">Bye</span>'}
+    </div>`;
   }).join('');
 
-  const upcoming = m.matchups.filter(x => x.period >= m.currentPeriod && x.period <= m.regularPeriods && (x.home?.teamId === an.my.id || x.away?.teamId === an.my.id))
-    .sort((a, b) => a.period - b.period).slice(0, 8)
-    .map(x => {
-      const oid = x.home?.teamId === an.my.id ? x.away?.teamId : x.home?.teamId;
-      const o = m.teams.find(t => t.id === oid);
-      const gp = o ? o.wins + o.losses + o.ties : 0;
-      return `<tr><td class="muted">Wk ${x.period}<br><span class="small">${A.periodRange(m, x.period)}</span></td><td>${o ? `<b>${esc(o.name)}</b><br><span class="small muted">${o.wins}-${o.losses}</span>` : '<span class="muted">Bye</span>'}</td><td class="num">${o && gp ? f0(o.pf / gp) : '–'}</td><td class="num">${sumGames(an.my, x.period)}</td><td class="num">${o ? sumGames(o, x.period) : '–'}</td></tr>`;
-    }).join('');
+  const sched = A.teamSchedule(m, me, b);
+  const future = sched.filter(x => !x.done && x.period <= m.regularPeriods);
+  const expWins = future.reduce((a, x) => a + (x.winProb ?? 0), 0);
+  const projW = an.my.wins + expWins, projL = an.my.losses + future.filter(x => x.opp).length - expWins;
+  const rows = sched.map(x => {
+    const cur = x.period === m.currentPeriod;
+    const po = x.period > m.regularPeriods;
+    const res = x.done
+      ? `<span class="res ${x.won ? 'w' : x.tie ? '' : 'l'}">${x.won ? 'W' : x.tie ? 'T' : 'L'}</span> ${f0(x.myPts)}–${f0(x.oppPts)}`
+      : `${f0(x.myProj)}–${f0(x.oppProj)}`;
+    return `<tr class="${cur ? 'me' : ''} ${x.done ? 'done' : ''}">
+      <td class="muted">${po ? 'PO ' : 'Wk '}${x.period}<br><span class="small">${A.periodRange(m, x.period)}</span></td>
+      <td>${x.opp ? `<button class="tlink" data-view="${x.opp.id}">${esc(x.opp.name)}</button><br><span class="small muted">${x.opp.wins}-${x.opp.losses}</span>` : '<span class="muted">Bye</span>'}</td>
+      <td class="num">${res}${cur ? '<br><span class="small muted">live + proj</span>' : ''}</td>
+      <td class="num">${x.done || x.winProb == null ? '' : `<b class="${x.winProb >= 0.5 ? 'up' : 'down'}">${pct(x.winProb)}</b>`}</td>
+    </tr>`;
+  }).join('');
 
-  const week = m.matchups.filter(x => x.period === m.currentPeriod && x.home && x.away)
-    .map(x => `<tr class="${[x.home.teamId, x.away.teamId].includes(an.my.id) ? 'me' : ''}"><td>${esc(teamName(x.home.teamId))}</td><td class="num"><b>${f0(x.home.pts)}</b></td><td class="num"><b>${f0(x.away.pts)}</b></td><td style="text-align:right">${esc(teamName(x.away.teamId))}</td></tr>`).join('');
-
-  return `<div class="grid2">
-    <section class="card"><h3>Standings <span class="r muted small">dashed line = playoff cut (top ${m.playoffTeamCount})</span></h3>
-      <table><thead><tr><th class="num">#</th><th>Team</th><th class="num">W-L</th><th class="num">GB</th><th class="num">PF</th><th class="num">PA</th></tr></thead><tbody>${rows}</tbody></table></section>
-    <div class="stack">
-      <section class="card"><h3>Your upcoming matchups</h3>
-        <table><thead><tr><th>Week</th><th>Opponent</th><th class="num" title="Opponent avg points per week">PF/wk</th><th class="num" title="Your roster's NBA games that week">Your G</th><th class="num" title="Their roster's NBA games that week">Their G</th></tr></thead><tbody>${upcoming || '<tr><td colspan="5" class="muted">Regular season complete.</td></tr>'}</tbody></table></section>
-      <section class="card"><h3>This week around the league</h3><table><tbody>${week}</tbody></table></section>
-    </div></div>`;
+  return `<section class="card"><h3>Week ${m.currentPeriod} scoreboard <span class="r muted small">${A.periodRange(m, m.currentPeriod)} · live score + projected final</span></h3>
+      <div class="board-list">${live || '<p class="muted">No matchups this week.</p>'}</div></section>
+    <section class="card"><h3>${esc(an.my.name)} · schedule & predictions <span class="r muted small">projected record <b>${Math.round(projW)}-${Math.round(projL)}</b></span></h3>
+      <div class="scrollx"><table><thead><tr><th>Week</th><th>Opponent</th><th class="num">Score / Proj</th><th class="num">Win %</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No schedule yet.</td></tr>'}</tbody></table></div>
+      <p class="muted small">Future weeks are projected with each team's current roster and NBA schedule, using ${esc(A.BASIS[state.settings.basis])} values and this league's scoring.</p></section>`;
 }
-const sumGames = (team, period) => team.roster.filter(p => p.slot !== 13).reduce((a, p) => a + A.gamesIn(state.model, p, state.model.periods[period] || []), 0);
+
+function vWatchlist() {
+  const { an, model: m } = state;
+  const ids = Object.entries(state.pnotes).filter(([, v]) => v.star || v.note).map(([id]) => +id);
+  const rows = ids.map(id => state.index.get(id)).filter(Boolean)
+    .sort((a, b) => isStar(b.p.id) - isStar(a.p.id) || val(b.p) - val(a.p))
+    .map(({ p, ownerId }) => `<tr>
+      <td>${pCell(p)}</td>
+      <td>${ownerId == null ? `<span class="badge b-wv">${p.status === 'WAIVERS' ? 'WAIVERS' : 'FREE AGENT'}</span>` : `<button class="tlink" data-view="${ownerId}">${esc(teamName(ownerId))}</button>`}</td>
+      <td class="num"><b>${f1(val(p))}</b></td>
+      <td class="num">${A.gamesIn(m, p, an.rem)}</td>
+      <td class="note-cell">${esc(noteOf(p.id)) || '<span class="muted">–</span>'}</td></tr>`).join('');
+  const missing = ids.filter(id => !state.index.has(id)).length;
+  return `<section class="card"><h3>Watchlist <span class="r muted small">star players or add notes from any player's name</span></h3>
+    ${rows ? `<div class="scrollx"><table><thead><tr><th>Player</th><th>Owner</th><th class="num">FP/G</th><th class="num" title="Games left this matchup">GL</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      : '<div class="empty" style="padding:30px"><p>Nothing here yet. Click any player name, anywhere in the app, to star them or write a note.</p></div>'}
+    ${missing ? `<p class="muted small">${missing} saved player${missing > 1 ? 's are' : ' is'} no longer rostered or in the top free agents.</p>` : ''}
+  </section>`;
+}
+
+function vDrawer() {
+  const hit = state.index.get(state.openPlayer);
+  if (!hit) return '';
+  const { p, ownerId } = hit;
+  const m = state.model;
+  const s = p.stats;
+  const row = (k, label) => s[k] ? `<tr><td>${label}</td><td class="num"><b>${f1(s[k].avg)}</b></td><td class="num muted">${s[k].gp || '–'}</td></tr>` : '';
+  const po = A.playoffPeriods(m).flatMap(id => m.periods[id] || []);
+  return `<div class="scrim" data-act="close"></div>
+  <aside class="drawer" role="dialog" aria-label="${esc(p.name)}">
+    <div class="dh">
+      <div><div class="dn">${esc(p.name)}${badge(p)}</div><div class="pm">${esc(abbr(p))} · ${esc(p.eligible.join('/') || p.pos)} · ${ownerId == null ? (p.status === 'WAIVERS' ? 'On waivers' : 'Free agent') : esc(teamName(ownerId))}</div></div>
+      <button class="ghost" data-act="close" aria-label="Close">✕</button>
+    </div>
+    <button class="btn ${isStar(p.id) ? 'primary' : ''}" data-act="pstar">${isStar(p.id) ? '★ Starred' : '☆ Star player'}</button>
+    <div class="facts">
+      <div><span class="k">FP/G</span><span class="v">${f1(val(p))}</span></div>
+      <div><span class="k">Games left</span><span class="v">${A.gamesIn(m, p, state.an.rem)}</span></div>
+      <div><span class="k">Playoff G</span><span class="v">${A.gamesIn(m, p, po)}</span></div>
+    </div>
+    <table><thead><tr><th>Split</th><th class="num">FP/G</th><th class="num">GP</th></tr></thead><tbody>
+      ${row('season', 'Season')}${row('l7', 'Last 7')}${row('l15', 'Last 15')}${row('l30', 'Last 30')}${row('proj', 'ESPN projection')}${row('prev', 'Last season')}
+    </tbody></table>
+    <label class="rk-label" for="pnote">Your notes</label>
+    <textarea id="pnote" data-act="pnote" rows="5" placeholder="e.g. buy-low target, minutes up since trade, ask about in trades…">${esc(noteOf(p.id))}</textarea>
+    <p class="muted small">Saved automatically, only in this browser.</p>
+  </aside>`;
+}
 
 function vSettings() {
   const s = state.settings;
   const m = state.model;
-  const teamOpts = m && !m.demo ? m.teams.map(t => `<option value="${t.id}" ${t.id === m.myTeamId ? 'selected' : ''}>${esc(t.name)}</option>`).join('') : '';
+  const mainId = starredTeam() ?? state.viewId;
+  const teamOpts = m && !m.demo ? m.teams.map(t => `<option value="${t.id}" ${t.id === mainId ? 'selected' : ''}>${esc(t.name)}</option>`).join('') : '';
   const signed = state.signedIn == null ? '' : state.signedIn
     ? '<span class="up">✓ Signed in to ESPN in this browser</span>'
     : '<span class="muted">Not signed in? </span> <button class="btn" data-act="signin">Sign in to ESPN</button>';
@@ -422,7 +556,7 @@ function vSettings() {
     <div class="form">
       <label>League ID<input id="f-league" inputmode="numeric" placeholder="e.g. 12345678" value="${esc(s.leagueId)}"></label>
       <label>Season<input id="f-season" inputmode="numeric" value="${esc(s.season)}"></label>
-      ${teamOpts ? `<label class="wide">My team<select id="f-team">${teamOpts}</select></label>` : ''}
+      ${teamOpts ? `<label class="wide">My main team (★ — opens first)<select id="f-team">${teamOpts}</select></label>` : ''}
       <div class="wide row">
         <button class="btn primary" data-act="save">Save & load league</button>
         <button class="btn" data-act="demo">Try demo data</button>
@@ -445,7 +579,7 @@ function vSettings() {
         <li>Open your league on <b>fantasy.espn.com</b> and look at the URL: <code>…/basketball/league?leagueId=<b>12345678</b></code>. Tip: open this popup while on that page and the ID fills in for you.</li>
         <li>Season is the year the NBA season ends (2026-27 → <code>2027</code>).</li>
         <li>Private league? Just be signed in at fantasy.espn.com. LinedUpBetter loads your league through an ESPN tab (it opens one in the background if needed), so your login just works.</li>
-        <li>Your team is auto-detected from your ESPN login. If it guesses wrong, pick it above.</li>
+        <li>Your team is auto-detected from your ESPN login. Pick another above, or use ☆ next to the team switcher to star any team as your main one.</li>
         <li>Data is cached for 10 minutes. Hit ↻ to force a refresh.</li>
       </ol></section>
     ${state.error ? `<section class="card err"><h3>Last error</h3><p>${esc(state.error)}</p></section>` : ''}`;
@@ -456,7 +590,7 @@ function vBody() {
   if (state.tab === 'settings') return vSettings();
   if (state.error) return `<div class="card err empty"><h2>Couldn't load your league</h2><p>${esc(state.error)}</p><div class="row" style="justify-content:center"><button class="btn primary" data-act="refresh">Try again</button><button class="btn" data-tab="settings">Settings</button></div></div>`;
   if (!state.model) return `<div class="empty"><h2>LinedUp<em>Better</em></h2><p>Connect your ESPN league to get started.</p><div class="row" style="justify-content:center"><button class="btn primary" data-tab="settings">Connect league</button><button class="btn" data-act="demo">Try demo</button></div></div>`;
-  return { overview: vOverview, roster: vRoster, waivers: vWaivers, playoffs: vPlayoffs, league: vLeague }[state.tab]();
+  return { overview: vOverview, roster: vRoster, matchups: vMatchups, waivers: vWaivers, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
 }
 
 function render() {
@@ -464,19 +598,38 @@ function render() {
   const scroll = document.querySelector('main')?.scrollTop || 0;
   let body;
   try { body = vBody(); } catch (e) { console.error(e); body = `<div class="card err">Something broke rendering this tab: ${esc(e.message)}</div>`; }
-  app.innerHTML = vHeader() + `<main>${body}</main>`;
+  let drawer = '';
+  try { drawer = state.model && state.openPlayer != null ? vDrawer() : ''; } catch (e) { console.error(e); }
+  app.innerHTML = vHeader() + `<main>${body}</main>` + drawer;
   if (state.keepScroll) document.querySelector('main').scrollTop = scroll;
   state.keepScroll = false;
 }
 
 // ---------- events
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-tab],[data-act],[data-pos],[data-sort]');
+  const t = e.target.closest('[data-tab],[data-act],[data-pos],[data-sort],[data-player],[data-view]');
   if (!t) return;
+  if (t.matches('select, textarea, input')) return;
+  if (t.dataset.player) { state.openPlayer = +t.dataset.player; state.keepScroll = true; render(); return; }
+  if (t.dataset.view) { setView(+t.dataset.view); return; }
   if (t.dataset.tab) { state.tab = t.dataset.tab; render(); return; }
   if (t.dataset.pos) { state.wv.pos = t.dataset.pos; state.keepScroll = true; render(); return; }
   if (t.dataset.sort) { state.wv.sort = t.dataset.sort; state.keepScroll = true; render(); return; }
   const act = t.dataset.act;
+  if (act === 'close') { state.openPlayer = null; state.keepScroll = true; render(); return; }
+  if (act === 'pstar') {
+    const id = state.openPlayer;
+    state.pnotes[id] = { ...state.pnotes[id], star: !isStar(id) };
+    await savePNotes(); state.keepScroll = true; render(); return;
+  }
+  if (act === 'star-team') {
+    const key = leagueKey();
+    state.settings.starred = { ...state.settings.starred };
+    if (state.settings.starred[key] === state.viewId) delete state.settings.starred[key];
+    else state.settings.starred[key] = state.viewId;
+    await saveSettings(); render(); return;
+  }
+  if (act === 'home') { setView(starredTeam()); return; }
   if (act === 'refresh') load(true);
   if (act === 'signin') chrome.tabs.create({ url: 'https://www.espn.com/login' });
   if (act === 'expand') chrome.tabs.create({ url: chrome.runtime.getURL('popup.html?full=1') });
@@ -486,7 +639,11 @@ document.addEventListener('click', async e => {
     const season = +document.getElementById('f-season').value.trim() || defaultSeason();
     const team = document.getElementById('f-team');
     const changed = leagueId !== state.settings.leagueId || season !== +state.settings.season;
-    Object.assign(state.settings, { leagueId, season, demo: false, teamId: team && !changed ? +team.value : null });
+    Object.assign(state.settings, { leagueId, season, demo: false });
+    if (team && !changed) {
+      state.settings.starred = { ...state.settings.starred, [leagueKey()]: +team.value };
+      state.viewId = +team.value;
+    }
     state.settings.espnS2 = document.getElementById('f-s2').value.trim();
     state.settings.swid = document.getElementById('f-swid').value.trim();
     await saveSettings();
@@ -494,8 +651,25 @@ document.addEventListener('click', async e => {
     load(true);
   }
 });
+function setView(id) {
+  if (id == null || !state.model?.teams.some(t => t.id === id)) return;
+  state.viewId = id; state.openPlayer = null;
+  reanalyze(); render();
+}
+let noteTimer;
+document.addEventListener('input', e => {
+  if (e.target.dataset.act !== 'pnote') return;
+  const id = state.openPlayer, text = e.target.value;
+  state.pnotes[id] = { ...state.pnotes[id], note: text };
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(savePNotes, 300);
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && state.openPlayer != null) { state.openPlayer = null; state.keepScroll = true; render(); }
+});
 document.addEventListener('change', async e => {
   const act = e.target.dataset.act;
+  if (act === 'view') { setView(+e.target.value); return; }
   if (act === 'basis') { state.settings.basis = e.target.value; await saveSettings(); reanalyze(); render(); }
   if (act === 'inj') { state.wv.showInjured = e.target.checked; state.keepScroll = true; render(); }
 });

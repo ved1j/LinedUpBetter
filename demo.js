@@ -1,5 +1,5 @@
 // Sample league in the same shape loadLeague() returns, so every tab works without an ESPN account.
-import { PRO_ABBR } from './api.js';
+import { PRO_ABBR, DEFAULT_POINTS } from './api.js';
 
 const FIRST = ['Jalen', 'Marcus', 'Devin', 'Tyrese', 'Andre', 'Malik', 'Jordan', 'Cam', 'Darius', 'Isaiah', 'Kris', 'Trey', 'Miles', 'Nico', 'Theo', 'Rico', 'Dante', 'Zion', 'Corey', 'Luka', 'Shai', 'Evan', 'Bam', 'Jaden', 'Keon', 'Amari', 'Xavier', 'Quentin', 'Bryce', 'Omar'];
 const LAST = ['Hale', 'Brooks', 'Carter', 'Vance', 'Ellis', 'Monroe', 'Price', 'Fields', 'Reyes', 'Holt', 'Banks', 'Sutton', 'Grant', 'Pierce', 'Wade', 'Mercer', 'Dawson', 'Okafor', 'Lindqvist', 'Barros', 'Kimura', 'Nash', 'Rowe', 'Tate', 'Whitfield', 'Quarles', 'Ibeh', 'Santos', 'Lowry', 'Fox'];
@@ -106,6 +106,8 @@ export function makeDemo() {
     currentSP, currentPeriod, regularPeriods: REG, playoffTeamCount: 6,
     periods, starters: 10, slotCounts: { 0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 11: 3, 12: 3, 13: 1 },
     acqLimit: 4, day1: d1.toLocaleDateString('en-CA'),
+    scoringType: 'H2H_POINTS', pointsEstimate: false, playoffRoundLength: 1, playoffSeeding: 'H2H_RECORD',
+    scoring: Object.entries(DEFAULT_POINTS).map(([statId, points]) => ({ statId: +statId, points })),
     teams, matchups, freeAgents, proTeams, myTeamId: 1,
   };
 }
