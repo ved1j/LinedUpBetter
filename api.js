@@ -2,7 +2,7 @@
 // Runs inside the extension, so requests carry the user's espn.com cookies
 // (espn_s2 / SWID) automatically — private leagues work once logged in.
 
-const BASE = 'https://lm-api-reads.fantasy.espn.com/apps/fantasy/v3/games/fba/seasons';
+const BASE = 'https://lm-api-reads.fantasy.espn.com/apis/v3/games/fba/seasons';
 
 export const PRO_ABBR = {
   1: 'ATL', 2: 'BOS', 3: 'NOP', 4: 'CHI', 5: 'CLE', 6: 'DAL', 7: 'DEN', 8: 'DET', 9: 'GSW', 10: 'HOU',
@@ -134,16 +134,23 @@ function normalize(L, P, F, season, leagueId) {
     .map(e => normPlayer(e.player, { status: e.status, season, pts }))
     .filter(Boolean);
 
-  const periods = {};
-  for (const [k, v] of Object.entries(sched.matchupPeriods || {})) periods[k] = v.map(Number);
+  const periods = buildPeriods(sched.matchupPeriods || {}, proTeams, day1);
+  const currentSP = L.scoringPeriodId || L.status?.latestScoringPeriod || 1;
+  const currentPeriod = L.status?.currentMatchupPeriod || 1;
+  // If our rebuilt calendar disagrees with ESPN about which matchup today is in,
+  // trust ESPN's period number and use the rebuilt days that contain today.
+  if (periods[currentPeriod] && !periods[currentPeriod].includes(currentSP)) {
+    const hit = Object.values(periods).find(days => days.includes(currentSP));
+    if (hit) periods[currentPeriod] = hit;
+  }
 
   return {
     demo: false,
     leagueId: String(leagueId),
     season,
     name: S.name || `League ${leagueId}`,
-    currentSP: L.scoringPeriodId || L.status?.latestScoringPeriod || 1,
-    currentPeriod: L.status?.currentMatchupPeriod || 1,
+    currentSP,
+    currentPeriod,
     regularPeriods: sched.matchupPeriodCount || Object.keys(periods).length,
     playoffTeamCount: sched.playoffTeamCount || 4,
     periods,
@@ -157,6 +164,55 @@ function normalize(L, P, F, season, leagueId) {
     proTeams,
     myTeamId: null,
   };
+}
+
+// ESPN basketball's matchupPeriods maps each matchup to fantasy *week* numbers
+// (e.g. {1:[1], ..., 21:[22,23]}), not days. ESPN doesn't expose week -> day, so we
+// rebuild it: Mon–Sun weeks from opening night, then merge the short opening week and
+// the lightest weeks (the All-Star break) into their neighbours until the count matches.
+function buildPeriods(matchupPeriods, proTeams, day1) {
+  const gameDays = new Set();
+  for (const t of Object.values(proTeams)) for (const sp of Object.keys(t.games)) gameDays.add(+sp);
+  const lastSP = Math.max(0, ...gameDays);
+  const units = Math.max(0, ...Object.values(matchupPeriods).flat().map(Number));
+  if (!lastSP || !units) return {};
+
+  const weekday = new Date(day1 + 'T12:00:00').getDay(); // 0 = Sunday
+  const weeks = [];
+  let cur = [];
+  for (let sp = 1; sp <= lastSP; sp++) {
+    cur.push(sp);
+    if ((weekday + sp - 1) % 7 === 0) { weeks.push(cur); cur = []; } // ends on Sunday
+  }
+  if (cur.length) weeks.push(cur);
+
+  const games = w => w.filter(sp => gameDays.has(sp)).length;
+  if (weeks.length > units && weeks[0].length < 7) weeks.splice(0, 2, [...weeks[0], ...weeks[1]]);
+  if (weeks.length > units) {
+    // All-Star break: the longest run of days with no NBA games, searched only from
+    // mid-January on (December has holes where NBA Cup games aren't scheduled yet).
+    const start = new Date(day1 + 'T12:00:00');
+    const midJan = new Date(start.getFullYear() + 1, 0, 15, 12);
+    const fromSP = Math.max(1, Math.round((midJan - start) / 864e5) + 1);
+    let best = { len: 0, sp: 0 }, run = 0;
+    for (let sp = fromSP; sp <= lastSP; sp++) {
+      run = gameDays.has(sp) ? 0 : run + 1;
+      if (run > best.len) best = { len: run, sp: sp - run + 1 };
+    }
+    const i = weeks.findIndex(w => w.includes(best.sp));
+    if (best.len >= 3 && i >= 0 && i < weeks.length - 1) weeks.splice(i, 2, [...weeks[i], ...weeks[i + 1]]);
+  }
+  while (weeks.length > units) {
+    let i = 1;
+    for (let k = 1; k < weeks.length - 1; k++) if (games(weeks[k]) < games(weeks[i])) i = k;
+    weeks.splice(i, 2, [...weeks[i], ...weeks[i + 1]]);
+  }
+
+  const periods = {};
+  for (const [id, list] of Object.entries(matchupPeriods)) {
+    periods[id] = list.flatMap(u => weeks[u - 1] || []);
+  }
+  return periods;
 }
 
 function normPlayer(p, { slot = null, status = null, season, pts }) {

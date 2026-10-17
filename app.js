@@ -81,7 +81,7 @@ async function attachEspnAuth() {
   const rule = s2 && sw && {
     id: 1, priority: 1,
     action: { type: 'modifyHeaders', requestHeaders: [{ header: 'Cookie', operation: 'set', value: `espn_s2=${s2}; SWID=${sw}` }] },
-    condition: { urlFilter: '||fantasy.espn.com/apps/fantasy/', resourceTypes: ['xmlhttprequest'] },
+    condition: { urlFilter: '||lm-api-reads.fantasy.espn.com/apis/', resourceTypes: ['xmlhttprequest'] },
   };
   await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [1], addRules: rule ? [rule] : [] });
   return !!rule;
@@ -260,7 +260,11 @@ function vOverview() {
 
 function vRoster() {
   const { an, model: m } = state;
-  const sps = m.periods[m.currentPeriod] || [];
+  // Long matchups (opening week, All-Star, playoffs) span 2 weeks: show today's Mon–Sun.
+  const all = m.periods[m.currentPeriod] || [];
+  const monday = sp => { const d = A.spDate(m, sp); return sp - ((d.getDay() + 6) % 7); };
+  const today = Math.min(Math.max(m.currentSP, all[0] ?? 1), all[all.length - 1] ?? 1);
+  const sps = all.length > 7 ? all.filter(sp => monday(sp) === monday(today)) : all;
   const order = s => (s === 13 ? 99 : s === 12 ? 50 : s ?? 40);
   const roster = an.my.roster.slice().sort((a, b) => order(a.slot) - order(b.slot) || val(b) - val(a));
   const dayHead = sps.map(sp => {
@@ -288,9 +292,9 @@ function vRoster() {
     const cls = d.open ? 'under' : d.benched ? 'over' : '';
     return `<td class="day"><span class="cnt ${cls}" title="${d.playing} playing / ${m.starters} slots">${d.playing}/${m.starters}</span></td>`;
   }).join('');
-  return `<section class="card"><h3>My roster · week ${m.currentPeriod} <span class="r muted small">${A.periodRange(m, m.currentPeriod)}</span></h3>
+  return `<section class="card"><h3>My roster · week ${m.currentPeriod} <span class="r muted small">${A.periodRange(m, m.currentPeriod)}${all.length > 7 ? ` · showing ${A.fmtMD(A.spDate(m, sps[0]))} – ${A.fmtMD(A.spDate(m, sps[sps.length - 1]))}` : ''}</span></h3>
     <div class="scrollx"><table>
-      <thead><tr><th>Slot</th><th>Player</th><th class="num" title="${A.BASIS[state.settings.basis]}">FP/G</th><th class="num">Season</th><th class="num">L15</th><th class="num">Δ</th><th class="num" title="Games left this week">GL</th>${dayHead}</tr></thead>
+      <thead><tr><th>Slot</th><th>Player</th><th class="num" title="${A.BASIS[state.settings.basis]}">FP/G</th><th class="num">Season</th><th class="num">L15</th><th class="num">Δ</th><th class="num" title="Games left in this matchup">GL</th>${dayHead}</tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><td colspan="7" class="num">Healthy players with a game / starting slots →</td>${foot}</tr></tfoot>
     </table></div>
