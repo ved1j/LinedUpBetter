@@ -49,29 +49,202 @@ export const remainingSps = (m, period = m.currentPeriod) => (m.periods[period] 
 export const playoffPeriods = m =>
   Object.keys(m.periods).map(Number).filter(id => id > m.regularPeriods).sort((a, b) => a - b);
 
-// Simulates each remaining day: healthy players with a game fill starting slots best-first.
-// Ignores positional eligibility, so it's a slight overestimate for thin rosters.
+// ---- Lineups
+// Starting slots from the league settings (everything except bench 12 / IR 13+).
+export function startingSlots(m) {
+  const out = [];
+  for (const [k, n] of Object.entries(m.slotCounts || {})) if (+k < 12) for (let i = 0; i < n; i++) out.push(+k);
+  return out.length ? out : Array(m.starters || 10).fill(11);
+}
+// Fill specific positions before flexible ones (PG..C, then SG/SF etc., then G/F, then UTIL).
+const SLOT_RANK = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 7: 1, 8: 1, 9: 1, 10: 1, 5: 2, 6: 2, 11: 3 };
+
+// Best lineup for one day: players are taken best-first and placed with augmenting
+// paths (bumping an already-placed player to another slot they can play). Greedy by
+// value + augmenting paths is optimal here, because lineups form a transversal matroid.
+export function fillLineup(players, slots) {
+  const owner = new Array(slots.length).fill(-1);
+  const order = slots.map((s, i) => i).sort((a, b) => (SLOT_RANK[slots[a]] ?? 3) - (SLOT_RANK[slots[b]] ?? 3));
+  const fits = pl => (pl.p.slots?.length ? order.filter(i => pl.p.slots.includes(slots[i])) : order);
+  const elig = players.map(fits);
+  const used = [];
+  players.forEach((pl, i) => {
+    const seen = new Set();
+    const place = pi => {
+      for (const si of elig[pi]) {
+        if (seen.has(si)) continue;
+        seen.add(si);
+        if (owner[si] === -1 || place(owner[si])) { owner[si] = pi; return true; }
+      }
+      return false;
+    };
+    if (place(i)) used.push(pl);
+  });
+  return { used, owner };
+}
+
+// Simulates each day: healthy players with a game fill the league's starting slots,
+// respecting position eligibility.
 export function projectDays(m, roster, sps, basis) {
   const active = roster.filter(p => p.slot !== 13 && !isOut(p));
+  const slots = startingSlots(m);
+  const vals = new Map(active.map(p => [p, value(p, basis) * (isDTD(p) ? 0.8 : 1)]));
   let total = 0, games = 0;
   const days = [];
   for (const sp of sps) {
-    const playing = active
-      .filter(p => gameOn(m, p, sp))
-      .map(p => value(p, basis) * (isDTD(p) ? 0.8 : 1))
-      .sort((a, b) => b - a);
-    const used = playing.slice(0, m.starters);
-    const pts = used.reduce((a, b) => a + b, 0);
+    const playing = active.filter(p => gameOn(m, p, sp)).map(p => ({ p, v: vals.get(p) })).sort((a, b) => b.v - a.v);
+    const { used } = fillLineup(playing, slots);
+    const pts = used.reduce((a, x) => a + x.v, 0);
     total += pts;
     games += used.length;
     days.push({
-      sp, pts,
+      sp, pts, starters: used.map(x => x.p),
       playing: playing.length,
-      open: Math.max(0, m.starters - playing.length),
-      benched: Math.max(0, playing.length - m.starters),
+      open: slots.length - used.length,
+      benched: playing.length - used.length,
     });
   }
   return { total, games, days };
+}
+
+// Back-to-back: the player's NBA team also played the day before.
+export const isB2B = (m, p, sp) => !!(gameOn(m, p, sp) && gameOn(m, p, sp - 1));
+
+// ---- Today's lineup vs the best possible one
+export function lineupCheck(m, team, basis) {
+  const sp = m.currentSP;
+  if (!(m.periods[m.currentPeriod] || []).includes(sp)) return null;
+  const best = projectDays(m, team.roster, [sp], basis).days[0];
+  const v = p => value(p, basis) * (isDTD(p) ? 0.8 : 1);
+  const starting = team.roster.filter(p => p.slot != null && p.slot < 12);
+  const current = starting.filter(p => gameOn(m, p, sp) && !isOut(p)).reduce((a, p) => a + v(p), 0);
+  const bestSet = new Set(best.starters);
+  const start = best.starters.filter(p => !(p.slot < 12));
+  // One bench move per start: sit idle/injured starters first, then the weakest.
+  const idle = p => !gameOn(m, p, sp) || isOut(p);
+  const sit = starting.filter(p => !bestSet.has(p))
+    .sort((a, b) => idle(b) - idle(a) || v(a) - v(b))
+    .slice(0, start.length);
+  return { gain: best.pts - current, start, sit, best: best.pts, current };
+}
+
+// ---- Streaming plan: sequence of add/drop moves for the rest of the matchup
+export function streamPlan(m, team, basis, maxAdds) {
+  const rem = remainingSps(m);
+  if (!rem.length || maxAdds <= 0) return [];
+  let roster = team.roster.slice();
+  let base = projectDays(m, roster, rem, basis).total;
+  const pool = m.freeAgents
+    .filter(p => !isOut(p) && gamesIn(m, p, rem) > 0)
+    .map(p => ({ p, k: value(p, basis) * gamesIn(m, p, rem) }))
+    .sort((a, b) => b.k - a.k).slice(0, 50).map(x => x.p);
+  const added = new Set();
+  const steps = [];
+  for (let k = 0; k < maxAdds; k++) {
+    const drops = roster.filter(p => p.slot !== 13 && !added.has(p.id))
+      .sort((a, b) => value(a, basis) - value(b, basis)).slice(0, 3);
+    let best = null;
+    for (const fa of pool) {
+      if (added.has(fa.id)) continue;
+      for (const d of drops) {
+        const gain = projectDays(m, [...roster.filter(p => p !== d), fa], rem, basis).total - base;
+        if (!best || gain > best.gain) best = { add: fa, drop: d, gain };
+      }
+    }
+    if (!best || best.gain < 4) break;
+    steps.push({ ...best, games: gamesIn(m, best.add, rem) });
+    roster = [...roster.filter(p => p !== best.drop), best.add];
+    added.add(best.add.id);
+    base += best.gain;
+  }
+  return steps;
+}
+
+export function addsLeft(m, team) {
+  if (!(m.acqLimit > 0)) return 3;
+  return Math.max(0, m.acqLimit - (team.acq?.[m.currentPeriod] || 0));
+}
+
+// ---- Playoff odds: Monte Carlo over the remaining regular-season matchups
+export function playoffOdds(m, basis, sims = 3000) {
+  const left = m.matchups.filter(x => x.period >= m.currentPeriod && x.period <= m.regularPeriods && x.home && x.away);
+  const team = id => m.teams.find(t => t.id === id);
+  const games = left.map(x => {
+    const pr = projectMatchup(m, x.period, team(x.home.teamId), team(x.away.teamId), basis, x.home.pts, x.away.pts);
+    return { h: x.home.teamId, a: x.away.teamId, wp: pr.winProb, hp: pr.homeProj, ap: pr.awayProj };
+  });
+  const n = m.playoffTeamCount || 4;
+  const pow2 = 2 ** Math.ceil(Math.log2(n));
+  const byes = n === pow2 ? 0 : pow2 - n;
+  const ids = m.teams.map(t => t.id);
+  const res = Object.fromEntries(ids.map(id => [id, { playoff: 0, bye: 0, seed: 0, expW: team(id).wins, expL: team(id).losses }]));
+  const pf0 = Object.fromEntries(m.teams.map(t => [t.id, t.pf]));
+  for (const g of games) {
+    res[g.h].expW += g.wp; res[g.h].expL += 1 - g.wp;
+    res[g.a].expW += 1 - g.wp; res[g.a].expL += g.wp;
+    pf0[g.h] += g.hp; pf0[g.a] += g.ap;
+  }
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  for (let s = 0; s < sims; s++) {
+    const w = Object.fromEntries(m.teams.map(t => [t.id, t.wins]));
+    for (const g of games) w[rnd() < g.wp ? g.h : g.a]++;
+    const order = ids.slice().sort((a, b) => w[b] - w[a] || pf0[b] - pf0[a] + (rnd() - 0.5) * 60);
+    order.forEach((id, i) => {
+      if (i < n) res[id].playoff++;
+      if (i < byes) res[id].bye++;
+      res[id].seed += i + 1;
+    });
+  }
+  for (const id of ids) {
+    res[id].playoff /= sims; res[id].bye /= sims; res[id].seed /= sims;
+  }
+  return { teams: res, byes, simulated: games.length };
+}
+
+// ---- Trades
+export function seasonWindows(m) {
+  const week = remainingSps(m);
+  const ros = Object.keys(m.periods).map(Number).filter(id => id >= m.currentPeriod && id <= m.regularPeriods)
+    .flatMap(id => m.periods[id]).filter(sp => sp >= m.currentSP);
+  const po = playoffPeriods(m).flatMap(id => m.periods[id] || []);
+  return { week, ros, po };
+}
+
+// Projected points for a team before/after a trade, in each window. If the team ends up
+// with more players than before, its lowest-value players are dropped to make room.
+export function tradeImpact(m, team, give, get, basis) {
+  const before = team.roster;
+  let after = [...before.filter(p => !give.includes(p)), ...get];
+  const drops = [];
+  while (after.length > before.length) {
+    const d = after.filter(p => p.slot !== 13 && !get.includes(p)).sort((a, b) => value(a, basis) - value(b, basis))[0]
+      || after.slice().sort((a, b) => value(a, basis) - value(b, basis))[0];
+    drops.push(d);
+    after = after.filter(p => p !== d);
+  }
+  const w = seasonWindows(m);
+  const calc = r => ({
+    week: projectDays(m, r, w.week, basis).total,
+    ros: projectDays(m, r, w.ros, basis).total,
+    po: projectDays(m, r, w.po, basis).total,
+  });
+  return { before: calc(before), after: calc(after), drops };
+}
+
+// League-wide form: rostered players on other teams playing below their norm (buy low),
+// and your players playing above it (sell high).
+export function buySell(m, teamId, basis) {
+  const form = p => {
+    const s = p.stats;
+    if (!s.season || !s.l15 || s.season.gp < 10 || s.l15.gp < 5) return null;
+    return s.l15.avg - s.season.avg;
+  };
+  const rows = m.teams.flatMap(t => t.roster.map(p => ({ p, owner: t, d: form(p), v: value(p, basis) }))).filter(x => x.d != null);
+  return {
+    buy: rows.filter(x => x.owner.id !== teamId && x.d < -2 && x.p.stats.season.avg >= 20).sort((a, b) => a.d - b.d).slice(0, 8),
+    sell: rows.filter(x => x.owner.id === teamId && x.d > 2).sort((a, b) => b.d - a.d).slice(0, 6),
+  };
 }
 
 function erf(x) {
@@ -183,8 +356,13 @@ export function analyze(m, basis = 'smart') {
     else note('bad', 'Matchup', `On pace to lose by ${Math.round(-diff)}`, `${wp}% win chance. You need volume: stream players who play on your open days.`);
   } else if (matchup?.bye) note('info', 'Matchup', 'Bye week', 'No matchup this period.');
 
+  const lc = lineupCheck(m, my, basis);
+  if (lc && lc.gain >= 1) {
+    note('bad', 'Today', `Set your lineup: +${Math.round(lc.gain)} pts today`,
+      [lc.start.length ? `Start ${lc.start.map(p => p.name).join(', ')}` : '', lc.sit.length ? `sit ${lc.sit.map(p => p.name).join(', ')}` : ''].filter(Boolean).join('; ') + '.');
+  }
   for (const p of my.roster) {
-    if (isOut(p) && p.slot !== 12 && p.slot !== 13) note('bad', 'Lineup', `${p.name} is out and starting`, 'Swap in a healthy bench player before lock.');
+    if (isOut(p) && p.slot !== 12 && p.slot !== 13 && !(lc && lc.sit.includes(p))) note('bad', 'Lineup', `${p.name} is out and starting`, 'Swap in a healthy bench player before lock.');
   }
   const irSlots = m.slotCounts?.[13] || 0;
   const inIR = my.roster.filter(p => p.slot === 13);
@@ -215,9 +393,13 @@ export function analyze(m, basis = 'smart') {
   if (hot.length) note('good', 'Form', 'Heating up', hot.slice(0, 4).join(', ') + ' (last 15 vs season).');
   if (cold.length) note('warn', 'Form', 'Cooling off', cold.slice(0, 4).join(', ') + '. Check minutes before benching.');
 
+  const plan = streamPlan(m, my, basis, addsLeft(m, my));
+  if (plan.length) {
+    const total = plan.reduce((a, x) => a + x.gain, 0);
+    note('good', 'Stream', `Streaming plan: +${Math.round(total)} pts this week`,
+      plan.map(x => `add ${x.add.name} for ${x.drop.name}`).join(', then ') + '. Details on the Waivers tab.');
+  }
   if (drop) {
-    const bestWeek = waivers.filter(w => !isOut(w.p)).sort((a, b) => b.weekGain - a.weekGain)[0];
-    if (bestWeek && bestWeek.weekGain >= 12) note('good', 'Stream', `Add ${bestWeek.p.name}, drop ${drop.name}`, `About +${Math.round(bestWeek.weekGain)} points this week on ${bestWeek.gl} games.`);
     const bestRos = waivers.filter(w => !isOut(w.p)).sort((a, b) => b.v - a.v)[0];
     if (bestRos && bestRos.rosGain >= 2) note('good', 'Waiver', `${bestRos.p.name} over ${drop.name}`, `${bestRos.v.toFixed(1)} vs ${dropV.toFixed(1)} FP/G rest of season.`);
   }
@@ -227,5 +409,5 @@ export function analyze(m, basis = 'smart') {
   }
   if (!notes.length) note('good', 'Lineup', 'Clean lineup', 'No injured starters and no open slots.');
 
-  return { my, rem, base, matchup, waivers, drop, dropV, feedback: notes };
+  return { my, rem, base, matchup, waivers, drop, dropV, feedback: notes, lineup: lc, plan };
 }

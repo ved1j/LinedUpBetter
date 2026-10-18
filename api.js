@@ -260,6 +260,7 @@ function normPlayer(p, { slot = null, status = null, season, pts }) {
     proTeamId: p.proTeamId,
     pos: POS[p.defaultPositionId] || '',
     eligible: (p.eligibleSlots || []).filter(x => x <= 4).map(x => SLOT[x]),
+    slots: (p.eligibleSlots || []).filter(x => x < 12),
     injury: p.injuryStatus || (p.injured ? 'OUT' : 'ACTIVE'),
     owned: p.ownership?.percentOwned ?? null,
     ownedChange: p.ownership?.percentChange ?? null,

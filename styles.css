@@ -270,3 +270,52 @@ textarea { width: 100%; background: var(--bg); border: 1px solid var(--line-2); 
 textarea:focus { outline: none; border-color: var(--volt); }
 .drawer .facts { grid-template-columns: repeat(3, 1fr); }
 .card .facts { grid-template-columns: repeat(2, 1fr); }
+
+/* ---------- lineup checker */
+.lineup { border: 1px solid rgba(255, 90, 78, .35); }
+.lineup.ok { border-color: transparent; }
+.okline { margin: 0; color: var(--good); font-weight: 500; }
+.swap { display: grid; grid-template-columns: 1fr auto 1fr; gap: 16px; align-items: start; }
+.gainbox { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 18px 10px 0; }
+.gainbox b { font-family: var(--display); font-weight: 800; font-size: 34px; color: var(--volt); line-height: 1; }
+.gainbox span { color: var(--muted); font-size: 11px; }
+.plist { list-style: none; margin: 0; padding: 0; }
+.plist li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0 6px 10px; border-top: 1px solid var(--line); }
+.plist li:first-child { border-top: 0; }
+.plist li.in { box-shadow: inset 2px 0 0 var(--good); }
+.plist li.out { box-shadow: inset 2px 0 0 var(--bad); }
+.gm.b2b { position: relative; }
+.gm.b2b::after { content: ""; position: absolute; top: 2px; right: 2px; width: 4px; height: 4px; border-radius: 50%; background: var(--warn); }
+
+/* ---------- streaming plan */
+.plan { list-style: none; margin: 0; padding: 0; }
+.plan li { display: grid; grid-template-columns: 20px 1fr 1fr auto 56px; gap: 12px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
+.plan li:first-child { border-top: 0; padding-top: 2px; }
+.plan .rk { font-family: var(--display); font-weight: 700; color: var(--dim); }
+.plan .meta { text-align: right; font-size: 12px; }
+.plan .meta small { color: var(--muted); }
+.plan .gain { font-family: var(--display); font-weight: 800; font-size: 20px; color: var(--volt); text-align: right; }
+.mv { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.tag-add, .tag-drop { font-family: var(--display); font-weight: 700; font-size: 10px; letter-spacing: .12em; padding: 2px 5px; border-radius: 3px; flex: none; }
+.tag-add { color: var(--ink); background: var(--good); }
+.tag-drop { color: var(--bad); border: 1px solid rgba(255, 90, 78, .5); }
+
+/* ---------- playoff odds */
+.odds-cell { display: inline-block; min-width: 44px; padding: 2px 6px; border-radius: 4px; font-family: var(--display); font-weight: 700; font-size: 13px; text-align: center;
+  background: linear-gradient(90deg, rgba(212, 255, 58, .22) var(--p), rgba(255, 255, 255, .04) var(--p)); }
+
+/* ---------- trade */
+.tsel { margin-left: auto; font-family: var(--body); font-size: 12px; letter-spacing: 0; text-transform: none; font-weight: 600; }
+.tlist { max-height: 300px; overflow: auto; margin: 0 -6px; }
+body.full .tlist { max-height: none; }
+.tp { display: flex; align-items: center; gap: 10px; padding: 6px; border-radius: 6px; cursor: pointer; }
+.tp:hover { background: rgba(255, 255, 255, .03); }
+.tp.on { background: var(--volt-soft); }
+.tp input { width: auto; accent-color: var(--volt); }
+.tp .pl { flex: 1; }
+.impact td:first-child { color: var(--muted); }
+.impact tr.sum td { border-bottom: 0; }
+.impact td.num { font-family: var(--display); font-weight: 700; font-size: 16px; }
+.verdict { font-weight: 600; margin: 12px 0 4px; }
+.gain.down { color: var(--bad); }
+.btn.mini { padding: 4px 9px; font-size: 10.5px; }

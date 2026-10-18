@@ -5,6 +5,9 @@ const FIRST = ['Jalen', 'Marcus', 'Devin', 'Tyrese', 'Andre', 'Malik', 'Jordan',
 const LAST = ['Hale', 'Brooks', 'Carter', 'Vance', 'Ellis', 'Monroe', 'Price', 'Fields', 'Reyes', 'Holt', 'Banks', 'Sutton', 'Grant', 'Pierce', 'Wade', 'Mercer', 'Dawson', 'Okafor', 'Lindqvist', 'Barros', 'Kimura', 'Nash', 'Rowe', 'Tate', 'Whitfield', 'Quarles', 'Ibeh', 'Santos', 'Lowry', 'Fox'];
 const TEAMS = ['Dunk Dynasty', 'Pick & Roll Tide', 'Splash Zone', 'The Glass Cleaners', 'Fast Break Fiends', 'Triple Double Trouble', 'Bench Mob', 'Brick City', 'Euro Steppers', 'Box Out Bandits'];
 const POS = ['PG', 'SG', 'SF', 'PF', 'C'];
+// Lineup slots each base position can fill (PG=0, SG=1, SF=2, PF=3, C=4, G=5, F=6,
+// SG/SF=7, G/F=8, PF/C=9, F/C=10, UTIL=11).
+const POS_SLOTS = { PG: [0, 5, 11], SG: [1, 5, 7, 8, 11], SF: [2, 6, 7, 8, 11], PF: [3, 6, 9, 10, 11], C: [4, 9, 10, 11] };
 const ELIG = { PG: ['PG', 'SG'], SG: ['PG', 'SG', 'SF'], SF: ['SG', 'SF', 'PF'], PF: ['SF', 'PF'], C: ['PF', 'C'] };
 
 export function makeDemo() {
@@ -43,7 +46,7 @@ export function makeDemo() {
     const gp = int(9, 13);
     const l15 = base * rand(0.78, 1.25);
     return {
-      id: pid++, name, proTeamId: int(1, 30), pos, eligible: ELIG[pos],
+      id: pid++, name, proTeamId: int(1, 30), pos, eligible: ELIG[pos], slots: [...new Set(ELIG[pos].flatMap(x => POS_SLOTS[x]))],
       injury: inj < 0.05 ? 'OUT' : inj < 0.11 ? 'DAY_TO_DAY' : 'ACTIVE',
       slot: null, status: null,
       stats: {

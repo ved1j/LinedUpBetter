@@ -13,12 +13,13 @@ Private leagues: stay logged in to espn.com in the same Chrome profile. The exte
 
 ## Tabs
 - **Overview**: live matchup, projected final score and win chance, the rundown (injured starters, healthy players stuck on IR, empty lineup slots by day, hot/cold players, streamer and upgrade suggestions, adds left), and the best adds this week.
-- **Roster**: lineup with FP/G, season vs last-15 trend, games left, and a day-by-day schedule grid showing open slots and overflow.
+- **Roster**: today's lineup checker (who to start and sit, and the points at stake), plus FP/G, trends, games left and a day-by-day schedule grid with back-to-back flags.
 - **Matchups**: every matchup this week with live and projected scores and win chances, plus the viewed team's full schedule: past results, predicted scores for every future week, and a projected final record.
-- **Waivers**: free agents ranked by schedule-adjusted FP/G, projected points gained this week, playoff games and ownership trend.
+- **Waivers**: a streaming plan (step-by-step add/drop moves within your adds limit), then free agents ranked by schedule-adjusted FP/G, projected points gained this week, playoff games and ownership trend.
+- **Trade**: pick players on both sides to see the projected points change this matchup, rest of season and in the playoffs, for both teams. Includes buy-low and sell-high lists.
 - **Playoffs**: NBA games per fantasy-playoff round for the roster and all 30 teams, plus free agents to stash.
 - **Watchlist**: players you starred or wrote notes on, wherever they are rostered.
-- **League**: standings (click a team to view as them) and the league's rules: points per stat, lineup, playoff teams and round dates.
+- **League**: standings with simulated playoff and bye odds and projected records (click a team to view as them) and the league's rules: points per stat, lineup, playoff teams and round dates.
 
 ## Your league's settings
 Every number uses your league's own scoring (points per stat), lineup size, matchup calendar and playoff rounds. Category leagues get ESPN's standard points scoring as an estimate.
@@ -29,6 +30,6 @@ Every number uses your league's own scoring (points per stat), lineup size, matc
 - Click any player name to star them or keep notes. Notes are saved per league, in this browser only.
 
 ## Notes
-- Lineup projections fill starting slots best-first each day and ignore position eligibility, so they run slightly high.
+- Projections fill each day's lineup optimally while respecting position eligibility (PG/SG/G/UTIL...).
 - Data is cached for 10 minutes; ↻ forces a refresh.
 - ESPN's API is unofficial and can change between seasons.

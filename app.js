@@ -19,7 +19,7 @@ document.body.classList.toggle('full', full);
 
 const defaultSeason = () => { const d = new Date(); return d.getMonth() >= 7 ? d.getFullYear() + 1 : d.getFullYear(); };
 const CACHE_MS = 10 * 60 * 1000;
-const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['waivers', 'Waivers'], ['playoffs', 'Playoffs'], ['watchlist', 'Watchlist'], ['league', 'League'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['waivers', 'Waivers'], ['trade', 'Trade'], ['playoffs', 'Playoffs'], ['watchlist', 'Watchlist'], ['league', 'League'], ['settings', 'Settings']];
 
 const state = {
   settings: { leagueId: '', season: defaultSeason(), teamId: null, basis: 'smart', demo: false, starred: {} },
@@ -28,6 +28,8 @@ const state = {
   pnotes: {},        // { playerId: { star: bool, note: string } } for this league
   index: new Map(),  // playerId -> { p, ownerId }
   openPlayer: null,
+  trade: { partner: null, give: [], get: [] },
+  oddsCache: null,
   wv: { pos: 'ALL', sort: 'score', showInjured: false },
 };
 
@@ -316,7 +318,8 @@ function vRoster() {
     const cells = sps.map(sp => {
       const g = A.gameOn(m, p, sp);
       const cls = sp < m.currentSP ? 'past' : '';
-      return `<td class="day ${cls}">${g ? `<span class="gm ${g.home ? 'home' : ''}">${g.home ? '' : '@'}${esc(m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || '')}</span>` : ''}</td>`;
+      const b2b = g && A.isB2B(m, p, sp);
+      return `<td class="day ${cls}">${g ? `<span class="gm ${g.home ? 'home' : ''} ${b2b ? 'b2b' : ''}" ${b2b ? 'title="Back-to-back: rest risk"' : ''}>${g.home ? '' : '@'}${esc(m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || '')}</span>` : ''}</td>`;
     }).join('');
     return `<tr class="${p.slot === 13 ? 'ir' : ''}">
       <td class="slot">${SLOT[p.slot] ?? ''}</td><td>${pCell(p)}</td>
@@ -331,13 +334,13 @@ function vRoster() {
     const cls = d.open ? 'under' : d.benched ? 'over' : '';
     return `<td class="day"><span class="cnt ${cls}" title="${d.playing} playing / ${m.starters} slots">${d.playing}/${m.starters}</span></td>`;
   }).join('');
-  return `<section class="card"><h3>${esc(an.my.name)} · week ${m.currentPeriod} <span class="r muted small">${A.periodRange(m, m.currentPeriod)}${all.length > 7 ? ` · showing ${A.fmtMD(A.spDate(m, sps[0]))} – ${A.fmtMD(A.spDate(m, sps[sps.length - 1]))}` : ''}</span></h3>
+  return vLineupCard() + `<section class="card"><h3>${esc(an.my.name)} · week ${m.currentPeriod} <span class="r muted small">${A.periodRange(m, m.currentPeriod)}${all.length > 7 ? ` · showing ${A.fmtMD(A.spDate(m, sps[0]))} – ${A.fmtMD(A.spDate(m, sps[sps.length - 1]))}` : ''}</span></h3>
     <div class="scrollx"><table>
       <thead><tr><th>Slot</th><th>Player</th><th class="num" title="${A.BASIS[state.settings.basis]}">FP/G</th><th class="num">Season</th><th class="num">L15</th><th class="num">Δ</th><th class="num" title="Games left in this matchup">GL</th>${dayHead}</tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><td colspan="7" class="num">Healthy players with a game / starting slots →</td>${foot}</tr></tfoot>
     </table></div>
-    <p class="muted small">Red counts = empty lineup slots (stream someone). Amber = more players than slots (games left on your bench). “@” = road game.</p>
+    <p class="muted small">Red counts = empty lineup slots (stream someone). Amber = more players than slots (games left on your bench). “@” = road game. Dot = back-to-back (rest risk).</p>
   </section>`;
 }
 
@@ -358,7 +361,7 @@ function vWaivers() {
       ${trendCell(x.trend)}<td class="num">${x.poGames}</td>
       <td class="num">${x.p.owned != null ? x.p.owned.toFixed(0) + '%' : '–'} <span class="small ${oc > 0 ? 'up' : oc < 0 ? 'down' : 'muted'}">${oc ? (oc > 0 ? '+' : '') + oc.toFixed(1) : ''}</span></td></tr>`;
   }).join('');
-  return `<section class="card">
+  return vPlanCard() + `<section class="card">
     <h3>Waiver wire <span class="r muted small">${an.drop ? `Drop candidate: <b>${esc(an.drop.name)}</b> (${f1(an.dropV)} FP/G, ${A.gamesIn(m, an.drop, an.rem)} GL)` : ''}</span></h3>
     <div class="chips">
       ${['ALL', 'PG', 'SG', 'SF', 'PF', 'C'].map(p => `<button class="chip ${w.pos === p ? 'on' : ''}" data-pos="${p}">${p}</button>`).join('')}
@@ -377,6 +380,41 @@ function vWaivers() {
     </table></div>
     <p class="muted small">UPGRADE = better FP/G than your drop candidate. W = on waivers (claim, not instant add). Click a column to sort.</p>
   </section>`;
+}
+
+function vLineupCard() {
+  const { an, model: m } = state;
+  const lc = an.lineup;
+  if (!lc) return '';
+  const today = A.fmtDow(A.spDate(m, m.currentSP)) + ' ' + A.fmtMD(A.spDate(m, m.currentSP));
+  if (lc.gain < 1) {
+    return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today}</span></h3>
+      <p class="okline">✓ Optimal: your starters are the best lineup for today's games (≈${f0(lc.best)} pts).</p></section>`;
+  }
+  const li = (ps, cls) => ps.map(p => `<li class="${cls}">${pCell(p)}<span class="num muted small">${A.gameOn(m, p, m.currentSP) ? f1(val(p)) + ' FP/G' : 'no game'}</span></li>`).join('');
+  return `<section class="card lineup"><h3>Today's lineup <span class="r muted small">${today} · ESPN lineup vs best possible</span></h3>
+    <div class="swap">
+      <div><div class="rk-label">Start</div><ul class="plist">${li(lc.start, 'in') || '<li class="muted">–</li>'}</ul></div>
+      <div class="gainbox"><b>+${f0(lc.gain)}</b><span>pts today</span></div>
+      <div><div class="rk-label">Sit</div><ul class="plist">${li(lc.sit, 'out') || '<li class="muted">–</li>'}</ul></div>
+    </div>
+    <p class="muted small">Based on today's NBA games and position rules. Make the swap on ESPN before tip-off.</p></section>`;
+}
+
+function vPlanCard() {
+  const { an, model: m } = state;
+  const plan = an.plan || [];
+  const left = A.addsLeft(m, an.my);
+  const head = `<h3>Streaming plan <span class="r muted small">${m.acqLimit > 0 ? `${left} add${left === 1 ? '' : 's'} left this matchup` : 'no add limit, showing up to 3 moves'}</span></h3>`;
+  if (!plan.length) return `<section class="card">${head}<p class="muted">No add/drop beats your current roster for the rest of this matchup.</p></section>`;
+  const total = plan.reduce((a, x) => a + x.gain, 0);
+  return `<section class="card">${head}
+    <ol class="plan">${plan.map((x, i) => `<li><span class="rk">${i + 1}</span>
+      <div class="mv"><span class="tag-add">ADD</span>${pCell(x.add)}</div>
+      <div class="mv"><span class="tag-drop">DROP</span>${pCell(x.drop)}</div>
+      <div class="meta">${x.games}<small> games left</small></div>
+      <div class="gain">+${f0(x.gain)}</div></li>`).join('')}</ol>
+    <p class="muted small">Total ≈ <b>+${f0(total)}</b> projected points this matchup. Each move is picked given the ones before it, and drops only come from your weakest players.</p></section>`;
 }
 
 function vPlayoffs() {
@@ -422,16 +460,69 @@ function vLeague() {
   const st = standings();
   const lead = st[0];
   const main = starredTeam();
+  const odds = getOdds();
+  const oc = x => `<td class="num"><span class="odds-cell" style="--p:${(x * 100).toFixed(0)}%">${x >= 0.995 ? '✓' : x < 0.005 ? '–' : Math.round(x * 100) + '%'}</span></td>`;
   const rows = st.map((t, i) => {
     const gb = ((lead.wins - t.wins) + (t.losses - lead.losses)) / 2;
     const cls = [t.id === an.my.id ? 'me' : '', i + 1 === m.playoffTeamCount ? 'line' : ''].join(' ');
-    return `<tr class="${cls}"><td class="num muted">${i + 1}</td><td><button class="tlink" data-view="${t.id}" title="View as this team">${t.id === main ? '<span class="star">★</span> ' : ''}${esc(t.name)}</button></td><td class="num">${t.wins}-${t.losses}${t.ties ? '-' + t.ties : ''}</td><td class="num">${gb ? gb.toFixed(1) : '–'}</td><td class="num">${f0(t.pf)}</td><td class="num">${f0(t.pa)}</td></tr>`;
+    const o = odds.teams[t.id];
+    return `<tr class="${cls}"><td class="num muted">${i + 1}</td><td><button class="tlink" data-view="${t.id}" title="View as this team">${t.id === main ? '<span class="star">★</span> ' : ''}${esc(t.name)}</button></td><td class="num">${t.wins}-${t.losses}${t.ties ? '-' + t.ties : ''}</td><td class="num">${gb ? gb.toFixed(1) : '–'}</td><td class="num">${f0(t.pf)}</td>
+      <td class="num muted">${Math.round(o.expW)}-${Math.round(o.expL)}</td>${oc(o.playoff)}${odds.byes ? oc(o.bye) : ''}</tr>`;
   }).join('');
   return `<div class="grid2">
-    <section class="card"><h3>Standings <span class="r muted small">click a team to view as them · dashed = playoff cut</span></h3>
-      <table><thead><tr><th class="num">#</th><th>Team</th><th class="num">W-L</th><th class="num">GB</th><th class="num">PF</th><th class="num">PA</th></tr></thead><tbody>${rows}</tbody></table></section>
+    <section class="card"><h3>Standings & playoff odds <span class="r muted small">click a team to view as them</span></h3>
+      <div class="scrollx"><table><thead><tr><th class="num">#</th><th>Team</th><th class="num">W-L</th><th class="num">GB</th><th class="num">PF</th><th class="num" title="Projected final record">Proj</th><th class="num" title="Chance to make the playoffs">Playoffs</th>${odds.byes ? '<th class="num" title="Chance of a first-round bye">Bye</th>' : ''}</tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="muted small">${odds.simulated ? `Simulated the ${odds.simulated} remaining regular-season matchups 3,000 times using each team's projected scores. Ties broken by points for.` : 'Regular season is over.'} Dashed line = playoff cut (top ${m.playoffTeamCount}).</p></section>
     ${vRules()}
   </div>`;
+}
+
+function getOdds() {
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}`;
+  if (state.oddsCache?.key !== key) state.oddsCache = { key, odds: A.playoffOdds(state.model, state.settings.basis) };
+  return state.oddsCache.odds;
+}
+
+function vTrade() {
+  const { an, model: m } = state;
+  const b = state.settings.basis;
+  const tr = state.trade;
+  const others = m.teams.filter(t => t.id !== an.my.id);
+  if (!others.some(t => t.id === tr.partner)) { tr.partner = others[0]?.id ?? null; tr.get = []; }
+  const partner = m.teams.find(t => t.id === tr.partner);
+  const mine = an.my.roster, theirs = partner?.roster || [];
+  const give = mine.filter(p => tr.give.includes(p.id)), get = theirs.filter(p => tr.get.includes(p.id));
+  const pick = (list, side) => list.slice().sort((a, b2) => val(b2) - val(a)).map(p => {
+    const on = tr[side].includes(p.id);
+    return `<label class="tp ${on ? 'on' : ''}"><input type="checkbox" data-trade="${side}" value="${p.id}" ${on ? 'checked' : ''}>${pCell(p)}<span class="num">${f1(val(p))}</span></label>`;
+  }).join('');
+  let result = '<p class="muted">Pick players on both sides to see the impact.</p>';
+  if (give.length || get.length) {
+    const a = A.tradeImpact(m, an.my, give, get, b);
+    const z = partner ? A.tradeImpact(m, partner, get, give, b) : null;
+    const d = (x, y) => { const v = y - x; return `<span class="${v > 0.5 ? 'up' : v < -0.5 ? 'down' : 'muted'}">${v > 0 ? '+' : ''}${f0(v)}</span>`; };
+    const row = (label, k) => `<tr><td>${label}</td><td class="num">${d(a.before[k], a.after[k])}</td>${z ? `<td class="num">${d(z.before[k], z.after[k])}</td>` : ''}</tr>`;
+    const verdict = (a.after.ros - a.before.ros) + (a.after.po - a.before.po);
+    const drops = [...a.drops.map(p => `${esc(an.my.name)} drops ${esc(p.name)}`), ...(z ? z.drops.map(p => `${esc(partner.name)} drops ${esc(p.name)}`) : [])];
+    result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
+        ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${row('Fantasy playoffs', 'po')}
+        <tr class="sum"><td>FP/G swapped</td><td class="num">${d(give.reduce((s2, p) => s2 + val(p), 0), get.reduce((s2, p) => s2 + val(p), 0))}</td>${z ? `<td class="num">${d(get.reduce((s2, p) => s2 + val(p), 0), give.reduce((s2, p) => s2 + val(p), 0))}</td>` : ''}</tr>
+      </tbody></table>
+      <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${verdict > 0 ? '+' : ''}${f0(verdict)} projected points the rest of the way (season + playoffs).</p>
+      ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}.</p>` : ''}`;
+  }
+  const bs = A.buySell(m, an.my.id, b);
+  const bsRow = (x, act) => `<div class="pick">${pCell(x.p)}<div class="meta">${f1(x.p.stats.l15.avg)}<small> L15</small><br>${f1(x.p.stats.season.avg)}<small> season</small></div>
+    <div class="gain ${x.d < 0 ? 'down' : ''}">${x.d > 0 ? '+' : ''}${f1(x.d)}</div>${act ? `<button class="btn mini" data-act="target" data-id="${x.p.id}" data-owner="${x.owner.id}">Target</button>` : ''}</div>`;
+  return `<div class="grid2">
+      <section class="card"><h3>You give <span class="r">${esc(an.my.name)}</span></h3><div class="tlist">${pick(mine, 'give')}</div></section>
+      <section class="card"><h3>You get <select class="tsel" data-act="partner">${others.map(t => `<option value="${t.id}" ${t.id === tr.partner ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></h3><div class="tlist">${pick(theirs, 'get')}</div></section>
+    </div>
+    <section class="card"><h3>Trade impact <span class="r">${give.length || get.length ? '<button class="link" data-act="trade-clear">Clear</button>' : ''}</span></h3>${result}</section>
+    <div class="grid2">
+      <section class="card"><h3>Buy low <span class="r muted small">other teams' players in a slump (last 15 vs season)</span></h3>${bs.buy.map(x => bsRow(x, true)).join('') || '<p class="muted">Shows up after ~2 weeks of games.</p>'}</section>
+      <section class="card"><h3>Sell high <span class="r muted small">your players above their norm</span></h3>${bs.sell.map(x => bsRow(x, false)).join('') || '<p class="muted">Nobody on your roster is running hot right now.</p>'}</section>
+    </div>`;
 }
 
 function vRules() {
@@ -590,7 +681,7 @@ function vBody() {
   if (state.tab === 'settings') return vSettings();
   if (state.error) return `<div class="card err empty"><h2>Couldn't load your league</h2><p>${esc(state.error)}</p><div class="row" style="justify-content:center"><button class="btn primary" data-act="refresh">Try again</button><button class="btn" data-tab="settings">Settings</button></div></div>`;
   if (!state.model) return `<div class="empty"><h2>LinedUp<em>Better</em></h2><p>Connect your ESPN league to get started.</p><div class="row" style="justify-content:center"><button class="btn primary" data-tab="settings">Connect league</button><button class="btn" data-act="demo">Try demo</button></div></div>`;
-  return { overview: vOverview, roster: vRoster, matchups: vMatchups, waivers: vWaivers, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
+  return { overview: vOverview, roster: vRoster, matchups: vMatchups, waivers: vWaivers, trade: vTrade, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
 }
 
 function render() {
@@ -630,6 +721,13 @@ document.addEventListener('click', async e => {
     await saveSettings(); render(); return;
   }
   if (act === 'home') { setView(starredTeam()); return; }
+  if (act === 'trade-clear') { state.trade.give = []; state.trade.get = []; state.keepScroll = true; render(); return; }
+  if (act === 'target') {
+    const owner = +t.dataset.owner, id = +t.dataset.id;
+    if (state.trade.partner !== owner) { state.trade.partner = owner; state.trade.get = []; }
+    if (!state.trade.get.includes(id)) state.trade.get.push(id);
+    document.querySelector('main').scrollTop = 0; render(); return;
+  }
   if (act === 'refresh') load(true);
   if (act === 'signin') chrome.tabs.create({ url: 'https://www.espn.com/login' });
   if (act === 'expand') chrome.tabs.create({ url: chrome.runtime.getURL('popup.html?full=1') });
@@ -653,7 +751,7 @@ document.addEventListener('click', async e => {
 });
 function setView(id) {
   if (id == null || !state.model?.teams.some(t => t.id === id)) return;
-  state.viewId = id; state.openPlayer = null;
+  state.viewId = id; state.openPlayer = null; state.trade.give = [];
   reanalyze(); render();
 }
 let noteTimer;
@@ -670,6 +768,13 @@ document.addEventListener('keydown', e => {
 document.addEventListener('change', async e => {
   const act = e.target.dataset.act;
   if (act === 'view') { setView(+e.target.value); return; }
+  if (act === 'partner') { state.trade.partner = +e.target.value; state.trade.get = []; render(); return; }
+  if (e.target.dataset.trade) {
+    const side = e.target.dataset.trade, id = +e.target.value;
+    const list = state.trade[side];
+    state.trade[side] = e.target.checked ? [...list, id] : list.filter(x => x !== id);
+    state.keepScroll = true; render(); return;
+  }
   if (act === 'basis') { state.settings.basis = e.target.value; await saveSettings(); reanalyze(); render(); }
   if (act === 'inj') { state.wv.showInjured = e.target.checked; state.keepScroll = true; render(); }
 });
