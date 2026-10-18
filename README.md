@@ -28,6 +28,7 @@ Every number uses your league's own scoring (points per stat), lineup size, matc
 - Use the team switcher in the header to see everything from any team's point of view.
 - Tap ☆ to make a team your main one. The app always opens on it.
 - Click any player name to star them or keep notes. Notes are saved per league, in this browser only.
+- Tap ✕ on a free agent to hide them from waivers, pickups, streaming plans and stash lists. Bring them back from "Hidden players" under the waiver wire.
 
 ## Notes
 - Projections fill each day's lineup optimally while respecting position eligibility (PG/SG/G/UTIL...).

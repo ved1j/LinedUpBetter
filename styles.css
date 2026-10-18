@@ -319,3 +319,16 @@ body.full .tlist { max-height: none; }
 .verdict { font-weight: 600; margin: 12px 0 4px; }
 .gain.down { color: var(--bad); }
 .btn.mini { padding: 4px 9px; font-size: 10.5px; }
+
+/* ---------- hide (X) players from waivers */
+.xbtn { background: none; border: 0; color: var(--dim); cursor: pointer; font-size: 12px; width: 22px; height: 22px; border-radius: 5px; flex: none; }
+.xbtn:hover { color: var(--bad); background: rgba(255, 90, 78, .12); }
+td.xcell { width: 26px; padding-left: 0; padding-right: 0; text-align: center; }
+.pick .xbtn { margin-left: -4px; }
+.hidden-list { margin-top: 10px; }
+.hidden-list summary { cursor: pointer; color: var(--muted); font-family: var(--display); font-weight: 700; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; list-style: none; }
+.hidden-list summary::before { content: "+ "; color: var(--volt); }
+.hidden-list[open] summary::before { content: "– "; }
+.hidden-list .chips { margin: 10px 0 0; }
+.chip.unhide span { color: var(--volt); margin-left: 3px; }
+.btn.warnbtn { border-color: var(--warn); color: var(--warn); }

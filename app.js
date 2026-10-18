@@ -43,6 +43,8 @@ const teamName = id => state.model.teams.find(t => t.id === id)?.name || `Team $
 const leagueKey = () => (state.settings.demo ? 'demo' : `${state.settings.leagueId}:${state.settings.season}`);
 const starredTeam = () => state.settings.starred?.[leagueKey()] ?? null;
 const isStar = id => !!state.pnotes[id]?.star;
+const isHidden = id => !!state.pnotes[id]?.hidden;
+const xBtn = id => `<button class="xbtn" data-act="hide" data-id="${id}" title="Hide from waivers" aria-label="Hide from waivers">✕</button>`;
 const noteOf = id => state.pnotes[id]?.note || '';
 const savePNotes = () => store.set(`pnotes:${leagueKey()}`, state.pnotes);
 const pct = x => `${Math.min(99, Math.max(1, Math.round(x * 100)))}%`;
@@ -216,7 +218,8 @@ function reanalyze() {
   const m = state.model;
   if (!m) { state.an = null; return; }
   m.myTeamId = state.viewId;
-  state.an = A.analyze(m, state.settings.basis);
+  // Players you've X'd out never show up in waiver suggestions, streaming plans or stash lists.
+  state.an = A.analyze({ ...m, freeAgents: m.freeAgents.filter(p => !isHidden(p.id)) }, state.settings.basis);
   state.index = new Map();
   for (const t of m.teams) for (const p of t.roster) state.index.set(p.id, { p, ownerId: t.id });
   for (const p of m.freeAgents) if (!state.index.has(p.id)) state.index.set(p.id, { p, ownerId: null });
@@ -292,7 +295,7 @@ function vOverview() {
       ${an.feedback.map(n => `<li class="note t-${n.type}"><span class="tag">${esc(n.tag)}</span><div><b>${esc(n.title)}</b>${n.detail ? `<span>${esc(n.detail)}</span>` : ''}</div></li>`).join('')}
     </ul></section>
     <section class="card"><h3>Pickups this week <span class="r">${an.drop ? `for ${esc(an.drop.name)}` : ''}</span></h3>
-      ${picks.map((w, i) => `<div class="pick"><span class="rk">${String(i + 1).padStart(2, '0')}</span>${pCell(w.p)}<div class="meta">${f1(w.v)}<small> FP/G</small><br>${w.gl}<small> games</small></div><div class="gain">${w.weekGain > 0 ? '+' : ''}${f0(w.weekGain)}</div></div>`).join('') || '<p class="muted">No free agents loaded.</p>'}
+      ${picks.map((w, i) => `<div class="pick"><span class="rk">${String(i + 1).padStart(2, '0')}</span>${pCell(w.p)}<div class="meta">${f1(w.v)}<small> FP/G</small><br>${w.gl}<small> games</small></div><div class="gain">${w.weekGain > 0 ? '+' : ''}${f0(w.weekGain)}</div>${xBtn(w.p.id)}</div>`).join('') || '<p class="muted">No free agents loaded.</p>'}
       <button class="link" data-tab="waivers">Full waiver wire →</button>
     </section>
   </div>`;
@@ -359,7 +362,8 @@ function vWaivers() {
       <td class="num"><b>${f1(x.score)}</b></td><td class="num">${f1(x.v)}</td>
       <td class="num">${x.gl}</td><td class="num ${x.weekGain > 0 ? 'up' : 'muted'}">${x.weekGain > 0 ? '+' : ''}${f0(x.weekGain)}</td>
       ${trendCell(x.trend)}<td class="num">${x.poGames}</td>
-      <td class="num">${x.p.owned != null ? x.p.owned.toFixed(0) + '%' : '–'} <span class="small ${oc > 0 ? 'up' : oc < 0 ? 'down' : 'muted'}">${oc ? (oc > 0 ? '+' : '') + oc.toFixed(1) : ''}</span></td></tr>`;
+      <td class="num">${x.p.owned != null ? x.p.owned.toFixed(0) + '%' : '–'} <span class="small ${oc > 0 ? 'up' : oc < 0 ? 'down' : 'muted'}">${oc ? (oc > 0 ? '+' : '') + oc.toFixed(1) : ''}</span></td>
+      <td class="xcell">${xBtn(x.p.id)}</td></tr>`;
   }).join('');
   return vPlanCard() + `<section class="card">
     <h3>Waiver wire <span class="r muted small">${an.drop ? `Drop candidate: <b>${esc(an.drop.name)}</b> (${f1(an.dropV)} FP/G, ${A.gamesIn(m, an.drop, an.rem)} GL)` : ''}</span></h3>
@@ -375,11 +379,20 @@ function vWaivers() {
         ${th('week', 'Wk +FP', 'Projected points gained this week if you swap in for your drop candidate (accounts for open lineup slots)')}
         ${th('trend', 'Δ L15', 'Last 15 days avg minus season avg')}
         ${th('po', 'PO G', 'Games during fantasy playoffs')}
-        ${th('own', '% Own', 'Rostered % and change — sort to find trending adds')}
-      </tr></thead><tbody>${rows || '<tr><td colspan="8" class="muted">No players match.</td></tr>'}</tbody>
+        ${th('own', '% Own', 'Rostered % and change — sort to find trending adds')}<th></th>
+      </tr></thead><tbody>${rows || '<tr><td colspan="9" class="muted">No players match.</td></tr>'}</tbody>
     </table></div>
-    <p class="muted small">UPGRADE = better FP/G than your drop candidate. W = on waivers (claim, not instant add). Click a column to sort.</p>
+    <p class="muted small">UPGRADE = better FP/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort.</p>
+    ${vHidden()}
   </section>`;
+}
+
+function vHidden() {
+  const hidden = state.model.freeAgents.filter(p => isHidden(p.id));
+  if (!hidden.length) return '';
+  return `<details class="hidden-list" ${state.showHidden ? 'open' : ''}><summary data-act="toggle-hidden">Hidden players (${hidden.length})</summary>
+    <div class="chips">${hidden.map(p => `<button class="chip unhide" data-act="unhide" data-id="${p.id}" title="Show in waivers again">${esc(p.name)} <span>↺</span></button>`).join('')}
+    <button class="link" data-act="unhide-all">Unhide all</button></div></details>`;
 }
 
 function vLineupCard() {
@@ -446,7 +459,7 @@ function vPlayoffs() {
       <section class="card"><h3>NBA games by playoff round</h3>
         <div class="scrollx"><table><thead><tr><th>Team</th>${head}<th class="num">Tot</th><th>Roster</th></tr></thead><tbody>${nbaRows}</tbody></table></div></section>
       <section class="card"><h3>Playoff stash targets <span class="r muted small">FP/G × playoff games</span></h3>
-        ${stash.map(w => `<div class="pick">${pCell(w.p)}<div class="num small muted">${f1(w.v)} FP/G<br>${w.poGames} PO games</div><div class="gain">${f0(w.poPts)}</div></div>`).join('')}
+        ${stash.map(w => `<div class="pick">${pCell(w.p)}<div class="num small muted">${f1(w.v)} FP/G<br>${w.poGames} PO games</div><div class="gain">${f0(w.poPts)}</div>${xBtn(w.p.id)}</div>`).join('')}
         <p class="muted small">Grab these a couple of weeks before the trade deadline / playoffs while they're cheap.</p></section>
     </div>`;
 }
@@ -620,7 +633,10 @@ function vDrawer() {
       <div><div class="dn">${esc(p.name)}${badge(p)}</div><div class="pm">${esc(abbr(p))} · ${esc(p.eligible.join('/') || p.pos)} · ${ownerId == null ? (p.status === 'WAIVERS' ? 'On waivers' : 'Free agent') : esc(teamName(ownerId))}</div></div>
       <button class="ghost" data-act="close" aria-label="Close">✕</button>
     </div>
-    <button class="btn ${isStar(p.id) ? 'primary' : ''}" data-act="pstar">${isStar(p.id) ? '★ Starred' : '☆ Star player'}</button>
+    <div class="row">
+      <button class="btn ${isStar(p.id) ? 'primary' : ''}" data-act="pstar">${isStar(p.id) ? '★ Starred' : '☆ Star player'}</button>
+      ${ownerId == null ? `<button class="btn ${isHidden(p.id) ? 'warnbtn' : ''}" data-act="${isHidden(p.id) ? 'unhide' : 'hide'}" data-id="${p.id}">${isHidden(p.id) ? '↺ Unhide in waivers' : '✕ Hide from waivers'}</button>` : ''}
+    </div>
     <div class="facts">
       <div><span class="k">FP/G</span><span class="v">${f1(val(p))}</span></div>
       <div><span class="k">Games left</span><span class="v">${A.gamesIn(m, p, state.an.rem)}</span></div>
@@ -708,6 +724,16 @@ document.addEventListener('click', async e => {
   if (t.dataset.sort) { state.wv.sort = t.dataset.sort; state.keepScroll = true; render(); return; }
   const act = t.dataset.act;
   if (act === 'close') { state.openPlayer = null; state.keepScroll = true; render(); return; }
+  if (act === 'hide' || act === 'unhide') {
+    const id = +t.dataset.id;
+    state.pnotes[id] = { ...state.pnotes[id], hidden: act === 'hide' };
+    await savePNotes(); reanalyze(); state.keepScroll = true; render(); return;
+  }
+  if (act === 'unhide-all') {
+    for (const id of Object.keys(state.pnotes)) if (state.pnotes[id].hidden) state.pnotes[id] = { ...state.pnotes[id], hidden: false };
+    await savePNotes(); reanalyze(); state.keepScroll = true; render(); return;
+  }
+  if (act === 'toggle-hidden') { e.preventDefault(); state.showHidden = !state.showHidden; state.keepScroll = true; render(); return; }
   if (act === 'pstar') {
     const id = state.openPlayer;
     state.pnotes[id] = { ...state.pnotes[id], star: !isStar(id) };
