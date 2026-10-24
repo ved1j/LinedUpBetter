@@ -332,3 +332,10 @@ td.xcell { width: 26px; padding-left: 0; padding-right: 0; text-align: center; }
 .hidden-list .chips { margin: 10px 0 0; }
 .chip.unhide span { color: var(--volt); margin-left: 3px; }
 .btn.warnbtn { border-color: var(--warn); color: var(--warn); }
+
+/* ---------- waiver schedule grid */
+th.day.sort { cursor: pointer; position: relative; }
+th.day.on { color: var(--volt); }
+td.day.sel { background: rgba(212, 255, 58, .05); }
+.openmark { display: block; margin: 2px auto 0; width: 16px; line-height: 14px; border-radius: 3px; background: var(--bad); color: var(--ink); font-weight: 700; font-size: 10px; }
+.gm.fill { background: var(--volt); color: var(--ink); border-color: var(--volt); }

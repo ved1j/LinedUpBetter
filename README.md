@@ -15,7 +15,7 @@ Private leagues: stay logged in to espn.com in the same Chrome profile. The exte
 - **Overview**: live matchup, projected final score and win chance, the rundown (injured starters, healthy players stuck on IR, empty lineup slots by day, hot/cold players, streamer and upgrade suggestions, adds left), and the best adds this week.
 - **Roster**: today's lineup checker (who to start and sit, and the points at stake), plus FP/G, trends, games left and a day-by-day schedule grid with back-to-back flags.
 - **Matchups**: every matchup this week with live and projected scores and win chances, plus the viewed team's full schedule: past results, predicted scores for every future week, and a projected final record.
-- **Waivers**: a streaming plan (step-by-step add/drop moves within your adds limit), then free agents ranked by schedule-adjusted FP/G, projected points gained this week, playoff games and ownership trend.
+- **Waivers**: a streaming plan (step-by-step add/drop moves within your adds limit), then free agents ranked, with each player's games this week day by day (highlighted when they land on your open lineup days; click a day to filter), by schedule-adjusted FP/G, projected points gained this week, playoff games and ownership trend.
 - **Trade**: pick players on both sides to see the projected points change this matchup, rest of season and in the playoffs, for both teams. Includes buy-low and sell-high lists.
 - **Playoffs**: NBA games per fantasy-playoff round for the roster and all 30 teams, plus free agents to stash.
 - **Watchlist**: players you starred or wrote notes on, wherever they are rostered.

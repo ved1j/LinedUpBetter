@@ -302,13 +302,18 @@ function vOverview() {
   return h;
 }
 
-function vRoster() {
-  const { an, model: m } = state;
-  // Long matchups (opening week, All-Star, playoffs) span 2 weeks: show today's Mon–Sun.
+// Days to show in schedule grids. Long matchups (opening week, All-Star, playoffs)
+// span two weeks, so show the Mon–Sun week that contains today.
+function weekWindow(m) {
   const all = m.periods[m.currentPeriod] || [];
   const monday = sp => { const d = A.spDate(m, sp); return sp - ((d.getDay() + 6) % 7); };
   const today = Math.min(Math.max(m.currentSP, all[0] ?? 1), all[all.length - 1] ?? 1);
-  const sps = all.length > 7 ? all.filter(sp => monday(sp) === monday(today)) : all;
+  return { all, sps: all.length > 7 ? all.filter(sp => monday(sp) === monday(today)) : all };
+}
+
+function vRoster() {
+  const { an, model: m } = state;
+  const { all, sps } = weekWindow(m);
   const order = s => (s === 13 ? 99 : s === 12 ? 50 : s ?? 40);
   const roster = an.my.roster.slice().sort((a, b) => order(a.slot) - order(b.slot) || val(b) - val(a));
   const dayHead = sps.map(sp => {
@@ -350,7 +355,11 @@ function vRoster() {
 function vWaivers() {
   const { an, model: m } = state;
   const w = state.wv;
-  let list = an.waivers.filter(x => (w.showInjured || !A.isOut(x.p)) && (w.pos === 'ALL' || x.p.eligible.includes(w.pos) || x.p.pos === w.pos));
+  const { sps } = weekWindow(m);
+  const openOn = Object.fromEntries(an.base.days.map(d => [d.sp, d.open]));
+  if (w.day != null && !sps.includes(w.day)) w.day = null;
+  let list = an.waivers.filter(x => (w.showInjured || !A.isOut(x.p)) && (w.pos === 'ALL' || x.p.eligible.includes(w.pos) || x.p.pos === w.pos)
+    && (w.day == null || A.gameOn(m, x.p, w.day)));
   const key = { score: x => x.score, v: x => x.v, week: x => x.weekGain, gl: x => x.gl, po: x => x.poGames, trend: x => x.trend ?? -99, own: x => x.p.ownedChange ?? -99 }[w.sort];
   list = list.sort((a, b) => key(b) - key(a)).slice(0, 60);
   const th = (k, label, title = '') => `<th class="num sort ${w.sort === k ? 'on' : ''}" data-sort="${k}" title="${title}">${label}</th>`;
@@ -363,12 +372,21 @@ function vWaivers() {
       <td class="num">${x.gl}</td><td class="num ${x.weekGain > 0 ? 'up' : 'muted'}">${x.weekGain > 0 ? '+' : ''}${f0(x.weekGain)}</td>
       ${trendCell(x.trend)}<td class="num">${x.poGames}</td>
       <td class="num">${x.p.owned != null ? x.p.owned.toFixed(0) + '%' : '–'} <span class="small ${oc > 0 ? 'up' : oc < 0 ? 'down' : 'muted'}">${oc ? (oc > 0 ? '+' : '') + oc.toFixed(1) : ''}</span></td>
+      ${sps.map(sp => {
+        const g = A.gameOn(m, x.p, sp);
+        const past = sp < m.currentSP;
+        const fills = g && !past && openOn[sp] > 0;
+        const opp = g ? (m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || '') : '';
+        const tip = g ? `${g.home ? 'vs' : '@'} ${opp}${fills ? ' · fills one of your open slots' : ''}${A.isB2B(m, x.p, sp) ? ' · back-to-back' : ''}` : '';
+        return `<td class="day ${past ? 'past' : ''} ${w.day === sp ? 'sel' : ''}">${g ? `<span class="gm ${g.home ? 'home' : ''} ${fills ? 'fill' : ''} ${A.isB2B(m, x.p, sp) ? 'b2b' : ''}" title="${esc(tip)}">${g.home ? '' : '@'}${esc(opp)}</span>` : ''}</td>`;
+      }).join('')}
       <td class="xcell">${xBtn(x.p.id)}</td></tr>`;
   }).join('');
   return vPlanCard() + `<section class="card">
     <h3>Waiver wire <span class="r muted small">${an.drop ? `Drop candidate: <b>${esc(an.drop.name)}</b> (${f1(an.dropV)} FP/G, ${A.gamesIn(m, an.drop, an.rem)} GL)` : ''}</span></h3>
     <div class="chips">
       ${['ALL', 'PG', 'SG', 'SF', 'PF', 'C'].map(p => `<button class="chip ${w.pos === p ? 'on' : ''}" data-pos="${p}">${p}</button>`).join('')}
+      ${w.day != null ? `<button class="chip on" data-day="${w.day}" title="Clear day filter">Plays ${A.fmtDow(A.spDate(m, w.day))} ✕</button>` : ''}
       <label><input type="checkbox" data-act="inj" ${w.showInjured ? 'checked' : ''}> Show injured</label>
     </div>
     <div class="scrollx"><table>
@@ -379,10 +397,16 @@ function vWaivers() {
         ${th('week', 'Wk +FP', 'Projected points gained this week if you swap in for your drop candidate (accounts for open lineup slots)')}
         ${th('trend', 'Δ L15', 'Last 15 days avg minus season avg')}
         ${th('po', 'PO G', 'Games during fantasy playoffs')}
-        ${th('own', '% Own', 'Rostered % and change — sort to find trending adds')}<th></th>
-      </tr></thead><tbody>${rows || '<tr><td colspan="9" class="muted">No players match.</td></tr>'}</tbody>
+        ${th('own', '% Own', 'Rostered % and change — sort to find trending adds')}
+        ${sps.map(sp => {
+          const d = A.spDate(m, sp);
+          const cls = sp === m.currentSP ? 'today' : sp < m.currentSP ? 'past' : '';
+          const open = sp >= m.currentSP ? openOn[sp] || 0 : 0;
+          return `<th class="day sort ${cls} ${w.day === sp ? 'on' : ''}" data-day="${sp}" title="Click to show only players with a game ${A.fmtDow(d)}${open ? ` · you have ${open} open slot${open > 1 ? 's' : ''}` : ''}">${A.fmtDow(d)}<br>${d.getDate()}${open ? `<span class="openmark">${open}</span>` : ''}</th>`;
+        }).join('')}<th></th>
+      </tr></thead><tbody>${rows || `<tr><td colspan="${9 + sps.length}" class="muted">No players match.</td></tr>`}</tbody>
     </table></div>
-    <p class="muted small">UPGRADE = better FP/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort.</p>
+    <p class="muted small">UPGRADE = better FP/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
     ${vHidden()}
   </section>`;
 }
@@ -714,12 +738,13 @@ function render() {
 
 // ---------- events
 document.addEventListener('click', async e => {
-  const t = e.target.closest('[data-tab],[data-act],[data-pos],[data-sort],[data-player],[data-view]');
+  const t = e.target.closest('[data-tab],[data-act],[data-pos],[data-sort],[data-player],[data-view],[data-day]');
   if (!t) return;
   if (t.matches('select, textarea, input')) return;
   if (t.dataset.player) { state.openPlayer = +t.dataset.player; state.keepScroll = true; render(); return; }
   if (t.dataset.view) { setView(+t.dataset.view); return; }
   if (t.dataset.tab) { state.tab = t.dataset.tab; render(); return; }
+  if (t.dataset.day) { const d = +t.dataset.day; state.wv.day = state.wv.day === d ? null : d; state.keepScroll = true; render(); return; }
   if (t.dataset.pos) { state.wv.pos = t.dataset.pos; state.keepScroll = true; render(); return; }
   if (t.dataset.sort) { state.wv.sort = t.dataset.sort; state.keepScroll = true; render(); return; }
   const act = t.dataset.act;
