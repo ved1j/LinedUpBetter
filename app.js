@@ -35,8 +35,8 @@ const state = {
 
 // ---------- helpers
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const f0 = n => Math.round(n ?? 0).toLocaleString();
-const f1 = n => (n == null ? '–' : (+n).toFixed(1));
+const f0 = n => (Number.isFinite(+n) && n != null ? Math.round(n).toLocaleString() : '–');
+const f1 = n => (Number.isFinite(+n) && n != null ? (+n).toFixed(1) : '–');
 const val = p => A.value(p, state.settings.basis);
 const abbr = p => state.model.proTeams[p.proTeamId]?.abbrev || PRO_ABBR[p.proTeamId] || 'FA';
 const teamName = id => state.model.teams.find(t => t.id === id)?.name || `Team ${id}`;
@@ -47,7 +47,7 @@ const isHidden = id => !!state.pnotes[id]?.hidden;
 const xBtn = id => `<button class="xbtn" data-act="hide" data-id="${id}" title="Hide from waivers" aria-label="Hide from waivers">✕</button>`;
 const noteOf = id => state.pnotes[id]?.note || '';
 const savePNotes = () => store.set(`pnotes:${leagueKey()}`, state.pnotes);
-const pct = x => `${Math.min(99, Math.max(1, Math.round(x * 100)))}%`;
+const pct = x => (Number.isFinite(x) ? `${Math.min(99, Math.max(1, Math.round(x * 100)))}%` : '–');
 const STAR = '<span class="star" title="Starred">★</span>';
 
 function badge(p) {
@@ -151,7 +151,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:${s.leagueId}:${s.season}`;
+      const key = `cache:v2:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {

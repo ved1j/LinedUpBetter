@@ -242,15 +242,21 @@ function normPlayer(p, { slot = null, status = null, season, pts }) {
     else if (s.seasonId === season && s.statSourceId === 1 && s.statSplitTypeId === 0) key = 'proj';
     else if (s.seasonId === season - 1 && s.statSourceId === 0 && s.statSplitTypeId === 0) key = 'prev';
     if (!key || stats[key]) continue;
-    const gp = s.stats?.[GP_STAT] || 0;
+    const gp = Number(s.stats?.[GP_STAT]) || 0;
     // Compute from per-game averages with the league's scoring when we can, so every
     // number matches this league's rules; ESPN's own appliedAverage is the fallback.
+    // Only scored stats count, and ESPN sends ratio stats as the string "Infinity" when a
+    // player has no turnovers — skip anything that isn't a finite number.
     let avg = null;
     if (s.averageStats && Object.keys(s.averageStats).length) {
-      avg = Object.entries(s.averageStats).reduce((a, [k, v]) => a + (pts[k] || 0) * v, 0);
+      avg = 0;
+      for (const [k, raw] of Object.entries(s.averageStats)) {
+        const v = Number(raw);
+        if (pts[k] && Number.isFinite(v)) avg += pts[k] * v;
+      }
     }
-    if (avg == null) avg = s.appliedAverage ?? null;
-    if (avg == null && s.appliedTotal != null && gp) avg = s.appliedTotal / gp;
+    if (avg == null || !Number.isFinite(avg)) avg = Number.isFinite(s.appliedAverage) ? s.appliedAverage : null;
+    if (avg == null && Number.isFinite(s.appliedTotal) && gp) avg = s.appliedTotal / gp;
     if (avg == null || (key !== 'proj' && !gp && !avg)) continue;
     stats[key] = { avg: Math.round(avg * 10) / 10, gp };
   }

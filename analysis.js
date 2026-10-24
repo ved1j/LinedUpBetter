@@ -12,10 +12,16 @@ export const BASIS = {
   proj: 'ESPN projection',
 };
 
-// Fantasy points per game. "smart" weights season + recent form by sample size,
-// and leans on projections / last season early in the year.
+// Fantasy points per game; never NaN (a bad split is ignored instead of poisoning totals).
+// "smart" weights season + recent form by sample size, and leans on projections /
+// last season early in the year.
 export function value(p, basis = 'smart') {
-  const s = p.stats || {};
+  const v = rawValue(p, basis);
+  return Number.isFinite(v) ? v : 0;
+}
+function rawValue(p, basis) {
+  const s = {};
+  for (const [k, x] of Object.entries(p.stats || {})) if (Number.isFinite(x?.avg)) s[k] = x;
   if (basis !== 'smart') {
     return s[basis]?.avg ?? s.proj?.avg ?? s.season?.avg ?? s.prev?.avg ?? 0;
   }
