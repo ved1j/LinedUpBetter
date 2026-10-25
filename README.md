@@ -32,5 +32,5 @@ Every number uses your league's own scoring (points per stat), lineup size, matc
 
 ## Notes
 - Projections fill each day's lineup optimally while respecting position eligibility (PG/SG/G/UTIL...).
-- Data is cached for 10 minutes; ↻ forces a refresh.
+- Data is cached for 3 minutes; ↻ forces a refresh.
 - ESPN's API is unofficial and can change between seasons.

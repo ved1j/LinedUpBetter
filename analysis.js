@@ -50,7 +50,13 @@ export function periodRange(m, id) {
 }
 
 export const gameOn = (m, p, sp) => m.proTeams[p.proTeamId]?.games?.[sp] || null;
-export const gamesIn = (m, p, sps) => sps.reduce((a, sp) => a + (gameOn(m, p, sp) ? 1 : 0), 0);
+// A game still to be played. Today's games that have tipped off are already counted in
+// ESPN's live score, so projections must not add them again.
+export const gameLeft = (m, p, sp, now = Date.now()) => {
+  const g = gameOn(m, p, sp);
+  return !!g && !(sp === m.currentSP && g.start && g.start <= now);
+};
+export const gamesIn = (m, p, sps) => sps.reduce((a, sp) => a + (gameLeft(m, p, sp) ? 1 : 0), 0);
 export const remainingSps = (m, period = m.currentPeriod) => (m.periods[period] || []).filter(sp => sp >= m.currentSP);
 export const playoffPeriods = m =>
   Object.keys(m.periods).map(Number).filter(id => id > m.regularPeriods).sort((a, b) => a - b);
@@ -95,22 +101,37 @@ export function projectDays(m, roster, sps, basis) {
   const active = roster.filter(p => p.slot !== 13 && !isOut(p));
   const slots = startingSlots(m);
   const vals = new Map(active.map(p => [p, value(p, basis) * (isDTD(p) ? 0.8 : 1)]));
+  const now = Date.now();
   let total = 0, games = 0;
   const days = [];
   for (const sp of sps) {
-    const playing = active.filter(p => gameOn(m, p, sp)).map(p => ({ p, v: vals.get(p) })).sort((a, b) => b.v - a.v);
-    const { used } = fillLineup(playing, slots);
+    const playing = active.filter(p => gameLeft(m, p, sp, now)).map(p => ({ p, v: vals.get(p) })).sort((a, b) => b.v - a.v);
+    const daySlots = sp === m.currentSP ? slotsLeftToday(m, roster) : slots;
+    const { used } = fillLineup(playing, daySlots);
     const pts = used.reduce((a, x) => a + x.v, 0);
     total += pts;
     games += used.length;
     days.push({
       sp, pts, starters: used.map(x => x.p),
       playing: playing.length,
-      open: slots.length - used.length,
+      open: daySlots.length - used.length,
       benched: playing.length - used.length,
     });
   }
   return { total, games, days };
+}
+
+// Today's starting slots that are still open: starters whose game already tipped off
+// are locked into theirs.
+export function slotsLeftToday(m, roster) {
+  const slots = startingSlots(m);
+  for (const p of roster) {
+    if (p.slot == null || p.slot >= 12) continue;
+    if (!gameOn(m, p, m.currentSP) || gameLeft(m, p, m.currentSP)) continue;
+    const i = slots.indexOf(p.slot);
+    if (i >= 0) slots.splice(i, 1); else slots.pop();
+  }
+  return slots;
 }
 
 // Back-to-back: the player's NBA team also played the day before.
@@ -122,12 +143,13 @@ export function lineupCheck(m, team, basis) {
   if (!(m.periods[m.currentPeriod] || []).includes(sp)) return null;
   const best = projectDays(m, team.roster, [sp], basis).days[0];
   const v = p => value(p, basis) * (isDTD(p) ? 0.8 : 1);
-  const starting = team.roster.filter(p => p.slot != null && p.slot < 12);
-  const current = starting.filter(p => gameOn(m, p, sp) && !isOut(p)).reduce((a, p) => a + v(p), 0);
+  // Players whose game already tipped off are locked; only compare the rest.
+  const starting = team.roster.filter(p => p.slot != null && p.slot < 12 && !(gameOn(m, p, sp) && !gameLeft(m, p, sp)));
+  const current = starting.filter(p => gameLeft(m, p, sp) && !isOut(p)).reduce((a, p) => a + v(p), 0);
   const bestSet = new Set(best.starters);
   const start = best.starters.filter(p => !(p.slot < 12));
   // One bench move per start: sit idle/injured starters first, then the weakest.
-  const idle = p => !gameOn(m, p, sp) || isOut(p);
+  const idle = p => !gameLeft(m, p, sp) || isOut(p);
   const sit = starting.filter(p => !bestSet.has(p))
     .sort((a, b) => idle(b) - idle(a) || v(a) - v(b))
     .slice(0, start.length);

@@ -18,7 +18,7 @@ const full = new URLSearchParams(location.search).has('full') || !isExt;
 document.body.classList.toggle('full', full);
 
 const defaultSeason = () => { const d = new Date(); return d.getMonth() >= 7 ? d.getFullYear() + 1 : d.getFullYear(); };
-const CACHE_MS = 10 * 60 * 1000;
+const CACHE_MS = 3 * 60 * 1000; // short: live scores must keep up with started games
 const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['waivers', 'Waivers'], ['trade', 'Trade'], ['playoffs', 'Playoffs'], ['watchlist', 'Watchlist'], ['league', 'League'], ['settings', 'Settings']];
 
 const state = {
@@ -151,7 +151,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:v2:${s.leagueId}:${s.season}`; // bump when the parser changes
+      const key = `cache:v3:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {
@@ -711,7 +711,7 @@ function vSettings() {
         <li>Season is the year the NBA season ends (2026-27 → <code>2027</code>).</li>
         <li>Private league? Just be signed in at fantasy.espn.com. LinedUpBetter loads your league through an ESPN tab (it opens one in the background if needed), so your login just works.</li>
         <li>Your team is auto-detected from your ESPN login. Pick another above, or use ☆ next to the team switcher to star any team as your main one.</li>
-        <li>Data is cached for 10 minutes. Hit ↻ to force a refresh.</li>
+        <li>Data is cached for 3 minutes. Hit ↻ to force a refresh.</li>
       </ol></section>
     ${state.error ? `<section class="card err"><h3>Last error</h3><p>${esc(state.error)}</p></section>` : ''}`;
 }

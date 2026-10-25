@@ -110,7 +110,7 @@ function normalize(L, P, F, season, leagueId) {
       const g = list?.[0];
       if (!g) continue;
       const home = g.homeProTeamId === t.id;
-      games[spk] = { opp: home ? g.awayProTeamId : g.homeProTeamId, home };
+      games[spk] = { opp: home ? g.awayProTeamId : g.homeProTeamId, home, start: g.date || null };
       if (g.date && (!anchor || +spk < anchor.sp)) anchor = { sp: +spk, date: g.date };
     }
     proTeams[t.id] = { abbrev: (t.abbrev || PRO_ABBR[t.id] || '').toUpperCase(), name: `${t.location || ''} ${t.name || ''}`.trim(), games };
