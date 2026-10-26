@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LinedUpBetter",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "Dashboard for ESPN points-league fantasy basketball: matchup projections, lineup notes, waiver pickups and playoff schedules.",
   "action": {
     "default_popup": "popup.html",

@@ -44,8 +44,9 @@ function rawValue(p, basis) {
   }
   const parts = [];
   const add = (k, w) => { if (s[k]?.avg != null && w > 0) parts.push([s[k].avg, w]); };
-  add('season', 0.45 * Math.min(1, (s.season?.gp || 0) / 15));
-  add('l15', 0.35 * Math.min(1, (s.l15?.gp || 0) / 8));
+  // Real games take over quickly: ~80% actual stats by 10 games played.
+  add('season', 0.5 * Math.min(1, (s.season?.gp || 0) / 10));
+  add('l15', 0.3 * Math.min(1, (s.l15?.gp || 0) / 6));
   const left = Math.max(0.2, 1 - parts.reduce((a, [, w]) => a + w, 0));
   add('proj', s.prev ? left * 0.6 : left);
   add('prev', s.proj ? left * 0.4 : left);

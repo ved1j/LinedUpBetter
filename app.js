@@ -38,6 +38,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const f0 = n => (Number.isFinite(+n) && n != null ? Math.round(n).toLocaleString() : '–');
 const f1 = n => (Number.isFinite(+n) && n != null ? (+n).toFixed(1) : '–');
 const val = p => A.value(p, state.settings.basis);
+// Actual fantasy points per game this season, scored with the league's settings (matches ESPN).
+const avgOf = p => p.stats?.season?.avg ?? null;
 const abbr = p => state.model.proTeams[p.proTeamId]?.abbrev || PRO_ABBR[p.proTeamId] || 'FA';
 const teamName = id => state.model.teams.find(t => t.id === id)?.name || `Team ${id}`;
 const leagueKey = () => (state.settings.demo ? 'demo' : `${state.settings.leagueId}:${state.settings.season}`);
@@ -235,7 +237,7 @@ function vHeader() {
     <div class="brand"><span class="mark" aria-hidden="true"></span><span class="wm">LinedUp<em>Better</em></span></div>
     ${m ? vTeamPicker() : ''}
     <div class="spacer"></div>
-    ${m ? `<label class="basis"><span>FP/G</span><select data-act="basis" title="How player value is calculated">${opts}</select></label>` : ''}
+    ${m ? `<label class="basis" title="How projected points per game (Proj/G) are calculated. Avg is always the real season average."><span>Proj</span><select data-act="basis">${opts}</select></label>` : ''}
     <button class="ghost" data-act="refresh" title="Refresh from ESPN" aria-label="Refresh">${ICON.refresh}</button>
     ${isExt && !full ? `<button class="ghost" data-act="expand" title="Open in a full tab" aria-label="Open full view">${ICON.expand}</button>` : ''}
   </header>
@@ -334,7 +336,7 @@ function vOverviewBody() {
       ${an.feedback.map(n => `<li class="note t-${n.type}"><span class="tag">${esc(n.tag)}</span><div><b>${esc(n.title)}</b>${n.detail ? `<span>${esc(n.detail)}</span>` : ''}</div></li>`).join('')}
     </ul></section>
     <section class="card"><h3>Pickups this week <span class="r">${an.drop ? `for ${esc(an.drop.name)}` : ''}</span></h3>
-      ${picks.map((w, i) => `<div class="pick"><span class="rk">${String(i + 1).padStart(2, '0')}</span>${pCell(w.p)}<div class="meta">${f1(w.v)}<small> FP/G</small><br>${w.gl}<small> games</small></div><div class="gain">${w.weekGain > 0 ? '+' : ''}${f0(w.weekGain)}</div>${xBtn(w.p.id)}</div>`).join('') || '<p class="muted">No free agents loaded.</p>'}
+      ${picks.map((w, i) => `<div class="pick"><span class="rk">${String(i + 1).padStart(2, '0')}</span>${pCell(w.p)}<div class="meta">${f1(avgOf(w.p))}<small> avg</small> · ${f1(w.v)}<small> proj</small><br>${w.gl}<small> games</small></div><div class="gain">${w.weekGain > 0 ? '+' : ''}${f0(w.weekGain)}</div>${xBtn(w.p.id)}</div>`).join('') || '<p class="muted">No free agents loaded.</p>'}
       <button class="link" data-tab="waivers">Full waiver wire →</button>
     </section>
   </div>`;
@@ -383,7 +385,7 @@ function vRoster() {
   }).join('');
   return vLineupCard() + `<section class="card"><h3>${esc(an.my.name)} · week ${m.currentPeriod} <span class="r muted small">${A.periodRange(m, m.currentPeriod)}${all.length > 7 ? ` · showing ${A.fmtMD(A.spDate(m, sps[0]))} – ${A.fmtMD(A.spDate(m, sps[sps.length - 1]))}` : ''}</span></h3>
     <div class="scrollx"><table>
-      <thead><tr><th>Slot</th><th>Player</th><th class="num" title="${A.BASIS[state.settings.basis]}">FP/G</th><th class="num">Season</th><th class="num">L15</th><th class="num">Δ</th><th class="num" title="Games left in this matchup">GL</th>${dayHead}</tr></thead>
+      <thead><tr><th>Slot</th><th>Player</th><th class="num" title="Projected FP per game (${A.BASIS[state.settings.basis]}) — what projections use">Proj/G</th><th class="num" title="Actual season average (matches ESPN)">Avg</th><th class="num">L15</th><th class="num">Δ</th><th class="num" title="Games left in this matchup">GL</th>${dayHead}</tr></thead>
       <tbody>${rows}</tbody>
       <tfoot><tr><td colspan="7" class="num">Healthy players with a game / starting slots →</td>${foot}</tr></tfoot>
     </table></div>
@@ -399,7 +401,7 @@ function vWaivers() {
   if (w.day != null && !sps.includes(w.day)) w.day = null;
   let list = an.waivers.filter(x => (w.showInjured || !A.isOut(x.p)) && (w.pos === 'ALL' || x.p.eligible.includes(w.pos) || x.p.pos === w.pos)
     && (w.day == null || A.gameOn(m, x.p, w.day)));
-  const key = { score: x => x.score, v: x => x.v, week: x => x.weekGain, gl: x => x.gl, po: x => x.poGames, trend: x => x.trend ?? -99, own: x => x.p.ownedChange ?? -99 }[w.sort];
+  const key = { score: x => x.score, avg: x => avgOf(x.p) ?? -1, v: x => x.v, week: x => x.weekGain, gl: x => x.gl, po: x => x.poGames, trend: x => x.trend ?? -99, own: x => x.p.ownedChange ?? -99 }[w.sort];
   list = list.sort((a, b) => key(b) - key(a)).slice(0, 60);
   const th = (k, label, title = '') => `<th class="num sort ${w.sort === k ? 'on' : ''}" data-sort="${k}" title="${title}">${label}</th>`;
   const rows = list.map(x => {
@@ -407,7 +409,7 @@ function vWaivers() {
     const wv = x.p.status === 'WAIVERS' ? '<span class="badge b-wv">W</span>' : '';
     const oc = x.p.ownedChange;
     return `<tr><td>${pCell(x.p, up + wv)}</td>
-      <td class="num"><b>${f1(x.score)}</b></td><td class="num">${f1(x.v)}</td>
+      <td class="num"><b>${f1(x.score)}</b></td><td class="num">${f1(avgOf(x.p))}</td><td class="num">${f1(x.v)}</td>
       <td class="num">${x.gl}</td><td class="num ${x.weekGain > 0 ? 'up' : 'muted'}">${x.weekGain > 0 ? '+' : ''}${f0(x.weekGain)}</td>
       ${trendCell(x.trend)}<td class="num">${x.poGames}</td>
       <td class="num">${x.p.owned != null ? x.p.owned.toFixed(0) + '%' : '–'} <span class="small ${oc > 0 ? 'up' : oc < 0 ? 'down' : 'muted'}">${oc ? (oc > 0 ? '+' : '') + oc.toFixed(1) : ''}</span></td>
@@ -422,7 +424,7 @@ function vWaivers() {
       <td class="xcell">${xBtn(x.p.id)}</td></tr>`;
   }).join('');
   return vPlanCard() + `<section class="card">
-    <h3>Waiver wire <span class="r muted small">${an.drop ? `Drop candidate: <b>${esc(an.drop.name)}</b> (${f1(an.dropV)} FP/G, ${A.gamesIn(m, an.drop, an.rem)} GL)` : ''}</span></h3>
+    <h3>Waiver wire <span class="r muted small">${an.drop ? `Drop candidate: <b>${esc(an.drop.name)}</b> (${f1(an.dropV)} proj/G, ${A.gamesIn(m, an.drop, an.rem)} GL)` : ''}</span></h3>
     <div class="chips">
       ${['ALL', 'PG', 'SG', 'SF', 'PF', 'C'].map(p => `<button class="chip ${w.pos === p ? 'on' : ''}" data-pos="${p}">${p}</button>`).join('')}
       ${w.day != null ? `<button class="chip on" data-day="${w.day}" title="Clear day filter">Plays ${A.fmtDow(A.spDate(m, w.day))} ✕</button>` : ''}
@@ -430,8 +432,9 @@ function vWaivers() {
     </div>
     <div class="scrollx"><table>
       <thead><tr><th>Player</th>
-        ${th('score', 'Score', 'FP/G adjusted for games left this week and injury')}
-        ${th('v', 'FP/G', A.BASIS[state.settings.basis])}
+        ${th('score', 'Score', 'Proj/G adjusted for games left this week and injury')}
+        ${th('avg', 'Avg', 'Actual season average (matches ESPN)')}
+        ${th('v', 'Proj/G', 'Projected FP per game: ' + A.BASIS[state.settings.basis])}
         ${th('gl', 'GL', 'Games left this week')}
         ${th('week', 'Wk +FP', 'Projected points gained this week if you swap in for your drop candidate (accounts for open lineup slots)')}
         ${th('trend', 'Δ L15', 'Last 15 days avg minus season avg')}
@@ -443,9 +446,9 @@ function vWaivers() {
           const open = sp >= m.currentSP ? openOn[sp] || 0 : 0;
           return `<th class="day sort ${cls} ${w.day === sp ? 'on' : ''}" data-day="${sp}" title="Click to show only players with a game ${A.fmtDow(d)}${open ? ` · you have ${open} open slot${open > 1 ? 's' : ''}` : ''}">${A.fmtDow(d)}<br>${d.getDate()}${open ? `<span class="openmark">${open}</span>` : ''}</th>`;
         }).join('')}<th></th>
-      </tr></thead><tbody>${rows || `<tr><td colspan="${9 + sps.length}" class="muted">No players match.</td></tr>`}</tbody>
+      </tr></thead><tbody>${rows || `<tr><td colspan="${10 + sps.length}" class="muted">No players match.</td></tr>`}</tbody>
     </table></div>
-    <p class="muted small">UPGRADE = better FP/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
+    <p class="muted small">Avg = real season average (same as ESPN). Proj/G = what projections use, blending the average with ESPN's projection early in the season. UPGRADE = better Proj/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
     ${vHidden()}
   </section>`;
 }
@@ -467,7 +470,7 @@ function vLineupCard() {
     return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today}</span></h3>
       <p class="okline">✓ Optimal: your starters are the best lineup for today's games (≈${f0(lc.best)} pts).</p></section>`;
   }
-  const li = (ps, cls) => ps.map(p => `<li class="${cls}">${pCell(p)}<span class="num muted small">${A.gameOn(m, p, m.currentSP) ? f1(val(p)) + ' FP/G' : 'no game'}</span></li>`).join('');
+  const li = (ps, cls) => ps.map(p => `<li class="${cls}">${pCell(p)}<span class="num muted small">${A.gameOn(m, p, m.currentSP) ? f1(val(p)) + ' proj' : 'no game'}</span></li>`).join('');
   return `<section class="card lineup"><h3>Today's lineup <span class="r muted small">${today} · ESPN lineup vs best possible</span></h3>
     <div class="swap">
       <div><div class="rk-label">Start</div><ul class="plist">${li(lc.start, 'in') || '<li class="muted">–</li>'}</ul></div>
@@ -521,8 +524,8 @@ function vPlayoffs() {
     <div class="grid2">
       <section class="card"><h3>NBA games by playoff round</h3>
         <div class="scrollx"><table><thead><tr><th>Team</th>${head}<th class="num">Tot</th><th>Roster</th></tr></thead><tbody>${nbaRows}</tbody></table></div></section>
-      <section class="card"><h3>Playoff stash targets <span class="r muted small">FP/G × playoff games</span></h3>
-        ${stash.map(w => `<div class="pick">${pCell(w.p)}<div class="num small muted">${f1(w.v)} FP/G<br>${w.poGames} PO games</div><div class="gain">${f0(w.poPts)}</div>${xBtn(w.p.id)}</div>`).join('')}
+      <section class="card"><h3>Playoff stash targets <span class="r muted small">Proj/G × playoff games</span></h3>
+        ${stash.map(w => `<div class="pick">${pCell(w.p)}<div class="num small muted">${f1(w.v)} proj/G<br>${w.poGames} PO games</div><div class="gain">${f0(w.poPts)}</div>${xBtn(w.p.id)}</div>`).join('')}
         <p class="muted small">Grab these a couple of weeks before the trade deadline / playoffs while they're cheap.</p></section>
     </div>`;
 }
@@ -582,7 +585,7 @@ function vTrade() {
     const drops = [...a.drops.map(p => `${esc(an.my.name)} drops ${esc(p.name)}`), ...(z ? z.drops.map(p => `${esc(partner.name)} drops ${esc(p.name)}`) : [])];
     result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
         ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${row('Fantasy playoffs', 'po')}
-        <tr class="sum"><td>FP/G swapped</td><td class="num">${d(give.reduce((s2, p) => s2 + val(p), 0), get.reduce((s2, p) => s2 + val(p), 0))}</td>${z ? `<td class="num">${d(get.reduce((s2, p) => s2 + val(p), 0), give.reduce((s2, p) => s2 + val(p), 0))}</td>` : ''}</tr>
+        <tr class="sum"><td>Proj/G swapped</td><td class="num">${d(give.reduce((s2, p) => s2 + val(p), 0), get.reduce((s2, p) => s2 + val(p), 0))}</td>${z ? `<td class="num">${d(get.reduce((s2, p) => s2 + val(p), 0), give.reduce((s2, p) => s2 + val(p), 0))}</td>` : ''}</tr>
       </tbody></table>
       <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${verdict > 0 ? '+' : ''}${f0(verdict)} projected points the rest of the way (season + playoffs).</p>
       ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}.</p>` : ''}`;
@@ -676,12 +679,12 @@ function vWatchlist() {
     .map(({ p, ownerId }) => `<tr>
       <td>${pCell(p)}</td>
       <td>${ownerId == null ? `<span class="badge b-wv">${p.status === 'WAIVERS' ? 'WAIVERS' : 'FREE AGENT'}</span>` : `<button class="tlink" data-view="${ownerId}">${esc(teamName(ownerId))}</button>`}</td>
-      <td class="num"><b>${f1(val(p))}</b></td>
+      <td class="num"><b>${f1(avgOf(p))}</b></td><td class="num">${f1(val(p))}</td>
       <td class="num">${A.gamesIn(m, p, an.rem)}</td>
       <td class="note-cell">${esc(noteOf(p.id)) || '<span class="muted">–</span>'}</td></tr>`).join('');
   const missing = ids.filter(id => !state.index.has(id)).length;
   return `<section class="card"><h3>Watchlist <span class="r muted small">star players or add notes from any player's name</span></h3>
-    ${rows ? `<div class="scrollx"><table><thead><tr><th>Player</th><th>Owner</th><th class="num">FP/G</th><th class="num" title="Games left this matchup">GL</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>`
+    ${rows ? `<div class="scrollx"><table><thead><tr><th>Player</th><th>Owner</th><th class="num" title="Actual season average">Avg</th><th class="num" title="Projected FP per game">Proj/G</th><th class="num" title="Games left this matchup">GL</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>`
       : '<div class="empty" style="padding:30px"><p>Nothing here yet. Click any player name, anywhere in the app, to star them or write a note.</p></div>'}
     ${missing ? `<p class="muted small">${missing} saved player${missing > 1 ? 's are' : ' is'} no longer rostered or in the top free agents.</p>` : ''}
   </section>`;
@@ -707,11 +710,11 @@ function vDrawer() {
       ${ownerId == null ? `<button class="btn ${isHidden(p.id) ? 'warnbtn' : ''}" data-act="${isHidden(p.id) ? 'unhide' : 'hide'}" data-id="${p.id}">${isHidden(p.id) ? '↺ Unhide in waivers' : '✕ Hide from waivers'}</button>` : ''}
     </div>
     <div class="facts">
-      <div><span class="k">FP/G</span><span class="v">${f1(val(p))}</span></div>
+      <div><span class="k">Avg</span><span class="v">${f1(avgOf(p))}</span></div><div><span class="k">Proj/G</span><span class="v">${f1(val(p))}</span></div>
       <div><span class="k">Games left</span><span class="v">${A.gamesIn(m, p, state.an.rem)}</span></div>
       <div><span class="k">Playoff G</span><span class="v">${A.gamesIn(m, p, po)}</span></div>
     </div>
-    <table><thead><tr><th>Split</th><th class="num">FP/G</th><th class="num">GP</th></tr></thead><tbody>
+    <table><thead><tr><th>Split</th><th class="num">Avg FP</th><th class="num">GP</th></tr></thead><tbody>
       ${row('season', 'Season')}${row('l7', 'Last 7')}${row('l15', 'Last 15')}${row('l30', 'Last 30')}${row('proj', 'ESPN projection')}${row('prev', 'Last season')}
     </tbody></table>
     <label class="rk-label" for="pnote">Your notes</label>

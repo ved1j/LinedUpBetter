@@ -350,3 +350,4 @@ td.day.sel { background: rgba(212, 255, 58, .05); }
 .wkback:hover { color: var(--volt); }
 .board.future .side .pts { opacity: .78; }
 .board .side .tn .tlink { font-weight: 600; }
+.drawer .facts { grid-template-columns: repeat(2, 1fr); }
