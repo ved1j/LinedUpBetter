@@ -151,7 +151,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:v3:${s.leagueId}:${s.season}`; // bump when the parser changes
+      const key = `cache:v4:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {
@@ -568,6 +568,8 @@ function vRules() {
   const chips = scoring.map(x => `<span class="rule ${x.points < 0 ? 'neg' : ''}"><b>${esc(STAT_NAMES[x.statId] || 'Stat ' + x.statId)}</b>${x.points > 0 ? '+' : ''}${+x.points.toFixed(2)}</span>`).join('');
   const slotCounts = Object.entries(m.slotCounts || {}).filter(([, n]) => n > 0).map(([k, n]) => `${SLOT[k] || k}${n > 1 ? '×' + n : ''}`).join(', ');
   const po = A.playoffPeriods(m);
+  const longWeeks = Object.keys(m.periods).map(Number).filter(id => id <= m.regularPeriods && (m.periods[id] || []).length > 7)
+    .sort((a, b) => a - b).map(id => `Wk ${id} (${A.periodRange(m, id)})`);
   const rounds = po.map((id, i) => `<li><b>Round ${i + 1}</b> <span class="muted">${A.periodRange(m, id)} · ${(m.periods[id] || []).length} days</span></li>`).join('');
   return `<section class="card"><h3>League rules <span class="r muted small">what every projection here uses</span></h3>
     ${m.pointsEstimate ? `<p class="warnline">This league scores by categories (${esc(m.scoringType)}). Values below use ESPN's standard points scoring as an estimate.</p>` : ''}
@@ -579,6 +581,9 @@ function vRules() {
       <div><span class="k">Adds / matchup</span><span class="v">${m.acqLimit > 0 ? m.acqLimit : 'No limit'}</span></div>
     </div>
     <div class="rk-label">Lineup</div><p class="small" style="margin:0 0 10px">${esc(slotCounts) || '–'}</p>
+    <div class="rk-label">Matchup calendar</div>
+    <p class="small" style="margin:0 0 10px">This week: <b>${A.periodRange(m, m.currentPeriod)}</b>. ${longWeeks.length ? `Longer matchups: ${longWeeks.join(', ')}.` : 'Every regular-season matchup is one week.'}
+      <span class="muted">Compare with ESPN's schedule page if anything looks off.</span></p>
     ${rounds ? `<div class="rk-label">Playoff rounds</div><ul class="rounds">${rounds}</ul>` : ''}
   </section>`;
 }

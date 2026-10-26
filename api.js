@@ -150,6 +150,7 @@ function normalize(L, P, F, season, leagueId) {
   const periods = buildPeriods(sched.matchupPeriods || {}, proTeams, day1);
   const currentSP = L.scoringPeriodId || L.status?.latestScoringPeriod || 1;
   const currentPeriod = L.status?.currentMatchupPeriod || 1;
+  applyPlayedDays(periods, L.schedule, currentPeriod, day1);
   // If our rebuilt calendar disagrees with ESPN about which matchup today is in,
   // trust ESPN's period number and use the rebuilt days that contain today.
   if (periods[currentPeriod] && !periods[currentPeriod].includes(currentSP)) {
@@ -186,14 +187,20 @@ function normalize(L, P, F, season, leagueId) {
 
 // ESPN basketball's matchupPeriods maps each matchup to fantasy *week* numbers
 // (e.g. {1:[1], ..., 21:[22,23]}), not days. ESPN doesn't expose week -> day, so we
-// rebuild it: Mon–Sun weeks from opening night, then merge the short opening week and
-// the lightest weeks (the All-Star break) into their neighbours until the count matches.
+// rebuild it: Mon–Sun weeks from opening night (the opening week is its own matchup,
+// even if it's short), then merge the All-Star break week and the lightest weeks into
+// their neighbours until the count matches. Leagues whose map already lists days
+// (values far above the number of weeks) are used as-is. Days a league has actually
+// played override all of this (see applyPlayedDays).
 function buildPeriods(matchupPeriods, proTeams, day1) {
   const gameDays = new Set();
   for (const t of Object.values(proTeams)) for (const sp of Object.keys(t.games)) gameDays.add(+sp);
   const lastSP = Math.max(0, ...gameDays);
   const units = Math.max(0, ...Object.values(matchupPeriods).flat().map(Number));
   if (!lastSP || !units) return {};
+  if (units > 40) {
+    return Object.fromEntries(Object.entries(matchupPeriods).map(([id, l]) => [id, l.map(Number)]));
+  }
 
   const weekday = new Date(day1 + 'T12:00:00').getDay(); // 0 = Sunday
   const weeks = [];
@@ -205,7 +212,6 @@ function buildPeriods(matchupPeriods, proTeams, day1) {
   if (cur.length) weeks.push(cur);
 
   const games = w => w.filter(sp => gameDays.has(sp)).length;
-  if (weeks.length > units && weeks[0].length < 7) weeks.splice(0, 2, [...weeks[0], ...weeks[1]]);
   if (weeks.length > units) {
     // All-Star break: the longest run of days with no NBA games, searched only from
     // mid-January on (December has holes where NBA Cup games aren't scheduled yet).
@@ -218,9 +224,10 @@ function buildPeriods(matchupPeriods, proTeams, day1) {
       if (run > best.len) best = { len: run, sp: sp - run + 1 };
     }
     const i = weeks.findIndex(w => w.includes(best.sp));
-    if (best.len >= 3 && i >= 0 && i < weeks.length - 1) weeks.splice(i, 2, [...weeks[i], ...weeks[i + 1]]);
+    if (best.len >= 3 && i >= 1 && i < weeks.length - 1) weeks.splice(i, 2, [...weeks[i], ...weeks[i + 1]]);
   }
   while (weeks.length > units) {
+    // Lightest remaining week (never the opening week) joins the week after it.
     let i = 1;
     for (let k = 1; k < weeks.length - 1; k++) if (games(weeks[k]) < games(weeks[i])) i = k;
     weeks.splice(i, 2, [...weeks[i], ...weeks[i + 1]]);
@@ -231,6 +238,35 @@ function buildPeriods(matchupPeriods, proTeams, day1) {
     periods[id] = list.flatMap(u => weeks[u - 1] || []);
   }
   return periods;
+}
+
+// Ground truth from the league itself: every matchup ESPN has scored lists the days it
+// covered (pointsByScoringPeriod). Finished matchups get exactly those days; the current
+// one keeps its real start and runs to the estimated end (or the Sunday after today).
+function applyPlayedDays(periods, schedule, currentPeriod, day1) {
+  const seen = {};
+  for (const m of schedule || []) {
+    for (const side of [m.home, m.away]) {
+      for (const k of Object.keys(side?.pointsByScoringPeriod || {})) (seen[m.matchupPeriodId] ||= new Set()).add(+k);
+    }
+  }
+  const range = (a, b) => Array.from({ length: Math.max(0, b - a + 1) }, (_, i) => a + i);
+  const sundayOnOrAfter = sp => {
+    const wd = new Date(day1 + 'T12:00:00');
+    wd.setDate(wd.getDate() + sp - 1);
+    return sp + ((7 - wd.getDay()) % 7);
+  };
+  for (const [id, set] of Object.entries(seen)) {
+    const days = [...set].sort((a, b) => a - b);
+    if (!days.length) continue;
+    const first = days[0], last = days[days.length - 1];
+    if (+id < currentPeriod) periods[id] = range(first, last);
+    else if (+id === currentPeriod) {
+      const guess = periods[id] || [];
+      const end = guess.length && guess[0] === first ? guess[guess.length - 1] : sundayOnOrAfter(last);
+      periods[id] = range(first, Math.max(end, last));
+    }
+  }
 }
 
 function normPlayer(p, { slot = null, status = null, season, pts }) {
