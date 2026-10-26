@@ -4,16 +4,13 @@ const OUT = new Set(['OUT', 'INJURY_RESERVE', 'SUSPENSION']);
 export const isOut = p => OUT.has(p.injury);
 export const isDTD = p => p.injury === 'DAY_TO_DAY' || p.injury === 'QUESTIONABLE';
 
-// Whether an injured player is expected to play on a given day:
-// ESPN's expected return date wins; out-for-season never returns; injured reserve with no
-// date stays out; any other OUT with no date misses the rest of the current matchup.
+// Whether an injured player is expected to play on a given day: only once ESPN
+// predicts them healthy (their expected return date). Out-for-season players and
+// anyone out with no return date yet don't count.
 export function availableOn(m, p, sp) {
   if (!isOut(p)) return true;
-  if (p.outForSeason) return false;
-  if (p.returnSP) return sp >= p.returnSP;
-  if (p.injury === 'INJURY_RESERVE') return false;
-  const cur = m.periods[m.currentPeriod] || [];
-  return sp > (cur[cur.length - 1] ?? m.currentSP);
+  if (p.outForSeason || !p.returnSP) return false;
+  return sp >= p.returnSP;
 }
 // Day-to-day discount applies to the current matchup only.
 const dtdFactor = (m, p, sp) => (isDTD(p) && (m.periods[m.currentPeriod] || []).includes(sp) ? 0.8 : 1);
@@ -21,7 +18,7 @@ export function returnLabel(p) {
   if (!isOut(p)) return '';
   if (p.outForSeason) return 'Out for season';
   if (p.returnDate) return `Expected back ${fmtMD(new Date(p.returnDate + 'T12:00:00'))}`;
-  return p.injury === 'INJURY_RESERVE' ? 'Injured reserve, no return date' : 'Out, no return date yet';
+  return 'Out, no return date yet (not counted in projections)';
 }
 
 export const BASIS = {

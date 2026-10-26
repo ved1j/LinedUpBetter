@@ -273,7 +273,7 @@ function vOverview() {
     <div><span class="k">Record</span><span class="v">${my.wins}-${my.losses}${my.ties ? '-' + my.ties : ''}</span></div>
     <div><span class="k">Standing</span><span class="v">${rank}<small>/${m.teams.length}</small></span></div>
     <div><span class="k">Avg / week</span><span class="v">${gp ? f0(my.pf / gp) : '–'}</span></div>
-    <div><span class="k">Games left</span><span class="v">${an.base.games}</span></div>
+    <div><span class="k">__GLABEL__</span><span class="v">__GVAL__</span></div>
   </div>`;
   return vBoard(strip) + vOverviewBody();
 }
@@ -300,7 +300,8 @@ function vBoard(strip) {
         ${!live ? `<button class="wkback" data-act="wk" data-p="${m.currentPeriod}">This week</button>` : ''}
       </div>
       <span>${label}</span></div>`;
-  if (!g || !g.opp) return `<section class="board">${nav}<p class="muted" style="margin:18px 0">${g ? 'Bye week.' : 'No matchup scheduled.'}</p>${strip}</section>`;
+  const fillStrip = (label, v) => strip.replace('__GLABEL__', label).replace('__GVAL__', v);
+  if (!g || !g.opp) return `<section class="board">${nav}<p class="muted" style="margin:18px 0">${g ? 'Bye week.' : 'No matchup scheduled.'}</p>${fillStrip('Games left', live ? an.base.games : '–')}</section>`;
 
   // Live week uses the main analysis (lineup-aware); other weeks use the schedule projection.
   const x = live && an.matchup && !an.matchup.bye ? an.matchup
@@ -319,7 +320,7 @@ function vBoard(strip) {
         <div class="side them"><div class="tn"><button class="tlink" data-view="${x.opp.id}" title="View as this team">${esc(x.opp.name)}</button></div><div class="pts">${f0(big(x.oppPts, x.oppProj))}</div><div class="proj">${sub(x.oppProj, x.oppGames)}</div></div>
       </div>
       ${result}
-      ${strip}
+      ${done ? fillStrip('Week ' + period, 'Final') : fillStrip(future ? `Wk ${period} games` : 'Games left', x.myGames)}
     </section>`;
 }
 
