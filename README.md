@@ -12,7 +12,7 @@ Chrome extension. Click the toolbar icon for the popup, or ⤢ to open it in a f
 Private leagues: stay logged in to espn.com in the same Chrome profile. The extension uses your existing session and only talks to espn.com.
 
 ## Tabs
-- **Overview**: live matchup, projected final score and win chance, the rundown (injured starters, healthy players stuck on IR, empty lineup slots by day, hot/cold players, streamer and upgrade suggestions, adds left), and the best adds this week.
+- **Overview**: matchup scoreboard with ‹ › arrows to step through weeks (final scores for past weeks, predicted scores and odds for future ones), projected final and win chance, the rundown (injured starters, healthy players stuck on IR, empty lineup slots by day, hot/cold players, streamer and upgrade suggestions, adds left), and the best adds this week.
 - **Roster**: today's lineup checker (who to start and sit, and the points at stake), plus FP/G, trends, games left and a day-by-day schedule grid with back-to-back flags.
 - **Matchups**: every matchup this week with live and projected scores and win chances, plus the viewed team's full schedule: past results, predicted scores for every future week, and a projected final record.
 - **Waivers**: a streaming plan (step-by-step add/drop moves within your adds limit), then free agents ranked, with each player's games this week day by day (highlighted when they land on your open lineup days; click a day to filter), by schedule-adjusted FP/G, projected points gained this week, playoff games and ownership trend.
@@ -31,6 +31,7 @@ Every number uses your league's own scoring (points per stat), lineup size, matc
 - Tap ✕ on a free agent to hide them from waivers, pickups, streaming plans and stash lists. Bring them back from "Hidden players" under the waiver wire.
 
 ## Notes
+- Injuries: players count from ESPN's expected return date. Out-for-season players never return; OUT with no date misses the rest of the current matchup; day-to-day players are discounted 20% for the current matchup only.
 - Projections fill each day's lineup optimally while respecting position eligibility (PG/SG/G/UTIL...).
 - Data is cached for 3 minutes; ↻ forces a refresh.
 - ESPN's API is unofficial and can change between seasons.

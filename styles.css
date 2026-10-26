@@ -339,3 +339,14 @@ th.day.on { color: var(--volt); }
 td.day.sel { background: rgba(212, 255, 58, .05); }
 .openmark { display: block; margin: 2px auto 0; width: 16px; line-height: 14px; border-radius: 3px; background: var(--bad); color: var(--ink); font-weight: 700; font-size: 10px; }
 .gm.fill { background: var(--volt); color: var(--ink); border-color: var(--volt); }
+.injline { color: var(--bad); font-size: 12px; margin-top: 4px; font-weight: 500; }
+
+/* ---------- week navigator */
+.wknav { display: flex; align-items: center; gap: 8px; color: var(--volt); }
+.arrow { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; border: 1px solid var(--line-2); background: none; color: var(--text); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 0 2px; }
+.arrow:hover:not([disabled]) { border-color: var(--volt); color: var(--volt); }
+.arrow[disabled] { opacity: .25; cursor: default; }
+.wkback { background: none; border: 0; color: var(--muted); cursor: pointer; font: inherit; letter-spacing: inherit; text-transform: inherit; padding: 0 0 0 6px; }
+.wkback:hover { color: var(--volt); }
+.board.future .side .pts { opacity: .78; }
+.board .side .tn .tlink { font-weight: 600; }

@@ -4,6 +4,26 @@ const OUT = new Set(['OUT', 'INJURY_RESERVE', 'SUSPENSION']);
 export const isOut = p => OUT.has(p.injury);
 export const isDTD = p => p.injury === 'DAY_TO_DAY' || p.injury === 'QUESTIONABLE';
 
+// Whether an injured player is expected to play on a given day:
+// ESPN's expected return date wins; out-for-season never returns; injured reserve with no
+// date stays out; any other OUT with no date misses the rest of the current matchup.
+export function availableOn(m, p, sp) {
+  if (!isOut(p)) return true;
+  if (p.outForSeason) return false;
+  if (p.returnSP) return sp >= p.returnSP;
+  if (p.injury === 'INJURY_RESERVE') return false;
+  const cur = m.periods[m.currentPeriod] || [];
+  return sp > (cur[cur.length - 1] ?? m.currentSP);
+}
+// Day-to-day discount applies to the current matchup only.
+const dtdFactor = (m, p, sp) => (isDTD(p) && (m.periods[m.currentPeriod] || []).includes(sp) ? 0.8 : 1);
+export function returnLabel(p) {
+  if (!isOut(p)) return '';
+  if (p.outForSeason) return 'Out for season';
+  if (p.returnDate) return `Expected back ${fmtMD(new Date(p.returnDate + 'T12:00:00'))}`;
+  return p.injury === 'INJURY_RESERVE' ? 'Injured reserve, no return date' : 'Out, no return date yet';
+}
+
 export const BASIS = {
   smart: 'Smart blend',
   season: 'Season avg',
@@ -56,7 +76,8 @@ export const gameLeft = (m, p, sp, now = Date.now()) => {
   const g = gameOn(m, p, sp);
   return !!g && !(sp === m.currentSP && g.start && g.start <= now);
 };
-export const gamesIn = (m, p, sps) => sps.reduce((a, sp) => a + (gameLeft(m, p, sp) ? 1 : 0), 0);
+// Games a player is expected to play: not yet tipped off, and healthy by then.
+export const gamesIn = (m, p, sps) => sps.reduce((a, sp) => a + (gameLeft(m, p, sp) && availableOn(m, p, sp) ? 1 : 0), 0);
 export const remainingSps = (m, period = m.currentPeriod) => (m.periods[period] || []).filter(sp => sp >= m.currentSP);
 export const playoffPeriods = m =>
   Object.keys(m.periods).map(Number).filter(id => id > m.regularPeriods).sort((a, b) => a - b);
@@ -98,14 +119,16 @@ export function fillLineup(players, slots) {
 // Simulates each day: healthy players with a game fill the league's starting slots,
 // respecting position eligibility.
 export function projectDays(m, roster, sps, basis) {
-  const active = roster.filter(p => p.slot !== 13 && !isOut(p));
+  // Injured players (including anyone in an IR slot) count from the day they're expected back.
+  const active = roster;
   const slots = startingSlots(m);
-  const vals = new Map(active.map(p => [p, value(p, basis) * (isDTD(p) ? 0.8 : 1)]));
+  const vals = new Map(active.map(p => [p, value(p, basis)]));
   const now = Date.now();
   let total = 0, games = 0;
   const days = [];
   for (const sp of sps) {
-    const playing = active.filter(p => gameLeft(m, p, sp, now)).map(p => ({ p, v: vals.get(p) })).sort((a, b) => b.v - a.v);
+    const playing = active.filter(p => gameLeft(m, p, sp, now) && availableOn(m, p, sp))
+      .map(p => ({ p, v: vals.get(p) * dtdFactor(m, p, sp) })).sort((a, b) => b.v - a.v);
     const daySlots = sp === m.currentSP ? slotsLeftToday(m, roster) : slots;
     const { used } = fillLineup(playing, daySlots);
     const pts = used.reduce((a, x) => a + x.v, 0);
@@ -145,11 +168,11 @@ export function lineupCheck(m, team, basis) {
   const v = p => value(p, basis) * (isDTD(p) ? 0.8 : 1);
   // Players whose game already tipped off are locked; only compare the rest.
   const starting = team.roster.filter(p => p.slot != null && p.slot < 12 && !(gameOn(m, p, sp) && !gameLeft(m, p, sp)));
-  const current = starting.filter(p => gameLeft(m, p, sp) && !isOut(p)).reduce((a, p) => a + v(p), 0);
+  const current = starting.filter(p => gameLeft(m, p, sp) && availableOn(m, p, sp)).reduce((a, p) => a + v(p), 0);
   const bestSet = new Set(best.starters);
   const start = best.starters.filter(p => !(p.slot < 12));
   // One bench move per start: sit idle/injured starters first, then the weakest.
-  const idle = p => !gameLeft(m, p, sp) || isOut(p);
+  const idle = p => !gameLeft(m, p, sp) || !availableOn(m, p, sp);
   const sit = starting.filter(p => !bestSet.has(p))
     .sort((a, b) => idle(b) - idle(a) || v(a) - v(b))
     .slice(0, start.length);
@@ -163,7 +186,7 @@ export function streamPlan(m, team, basis, maxAdds) {
   let roster = team.roster.slice();
   let base = projectDays(m, roster, rem, basis).total;
   const pool = m.freeAgents
-    .filter(p => !isOut(p) && gamesIn(m, p, rem) > 0)
+    .filter(p => gamesIn(m, p, rem) > 0)
     .map(p => ({ p, k: value(p, basis) * gamesIn(m, p, rem) }))
     .sort((a, b) => b.k - a.k).slice(0, 50).map(x => x.p);
   const added = new Set();
@@ -327,6 +350,7 @@ export function teamSchedule(m, teamId, basis) {
       const pr = projectMatchup(m, x.period, me, opp, basis, myPts, oppPts);
       const won = x.winner === 'UNDECIDED' || !x.winner ? null : (x.winner === (home ? 'HOME' : 'AWAY'));
       return { period: x.period, opp, myPts, oppPts, myProj: pr.homeProj, oppProj: pr.awayProj,
+        myGames: pr.homeGames, oppGames: pr.awayGames,
         winProb: opp ? pr.winProb : null, done: x.period < m.currentPeriod, won, tie: x.winner === 'TIE' };
     });
 }
@@ -363,7 +387,7 @@ export function analyze(m, basis = 'smart') {
     const v = value(p, basis);
     const gl = gamesIn(m, p, rem);
     let score = v * (1 + 0.06 * (gl - 3));
-    if (isOut(p)) score *= 0.4; else if (isDTD(p)) score *= 0.9;
+    if (isOut(p) && (p.outForSeason || !p.returnSP)) score *= 0.4; else if (isDTD(p)) score *= 0.9;
     const weekGain = drop ? projectDays(m, [...without, p], rem, basis).total - base.total : 0;
     const s = p.stats;
     return {
@@ -390,12 +414,12 @@ export function analyze(m, basis = 'smart') {
       [lc.start.length ? `Start ${lc.start.map(p => p.name).join(', ')}` : '', lc.sit.length ? `sit ${lc.sit.map(p => p.name).join(', ')}` : ''].filter(Boolean).join('; ') + '.');
   }
   for (const p of my.roster) {
-    if (isOut(p) && p.slot !== 12 && p.slot !== 13 && !(lc && lc.sit.includes(p))) note('bad', 'Lineup', `${p.name} is out and starting`, 'Swap in a healthy bench player before lock.');
+    if (!availableOn(m, p, m.currentSP) && p.slot !== 12 && p.slot !== 13 && !(lc && lc.sit.includes(p))) note('bad', 'Lineup', `${p.name} is out and starting`, `${returnLabel(p)}. Swap in a healthy bench player before lock.`);
   }
   const irSlots = m.slotCounts?.[13] || 0;
   const inIR = my.roster.filter(p => p.slot === 13);
   for (const p of inIR) {
-    if (!isOut(p)) note('warn', 'IR', `${p.name} is healthy on IR`, 'ESPN locks adds and drops until you activate or drop them.');
+    if (availableOn(m, p, m.currentSP)) note('warn', 'IR', `${p.name} is healthy on IR`, 'ESPN locks adds and drops until you activate or drop them.');
   }
   if (inIR.length < irSlots) {
     const benchOut = my.roster.filter(p => p.slot === 12 && isOut(p));

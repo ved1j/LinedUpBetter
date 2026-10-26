@@ -53,7 +53,8 @@ const STAR = '<span class="star" title="Starred">★</span>';
 function badge(p) {
   const map = { OUT: ['O', 'b-out'], INJURY_RESERVE: ['IR', 'b-out'], SUSPENSION: ['SSPD', 'b-out'], DAY_TO_DAY: ['DTD', 'b-dtd'], QUESTIONABLE: ['Q', 'b-dtd'] };
   const b = map[p.injury];
-  return b ? `<span class="badge ${b[1]}">${b[0]}</span>` : '';
+  const tip = [p.injuryType, A.returnLabel(p)].filter(Boolean).join(' · ');
+  return b ? `<span class="badge ${b[1]}" ${tip ? `title="${esc(tip)}"` : ''}>${b[0]}</span>` : '';
 }
 function pCell(p, extra = '') {
   const pos = p.eligible?.length ? p.eligible.join('/') : p.pos;
@@ -151,7 +152,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:v4:${s.leagueId}:${s.season}`; // bump when the parser changes
+      const key = `cache:v5:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {
@@ -274,20 +275,57 @@ function vOverview() {
     <div><span class="k">Avg / week</span><span class="v">${gp ? f0(my.pf / gp) : '–'}</span></div>
     <div><span class="k">Games left</span><span class="v">${an.base.games}</span></div>
   </div>`;
-  let h = '';
-  if (x && !x.bye) {
-    const wp = Math.min(99, Math.max(1, Math.round(x.winProb * 100)));
-    h += `<section class="board">
-      <div class="board-top"><span>Week ${m.currentPeriod}</span><span>${A.periodRange(m, m.currentPeriod)}</span></div>
-      <div class="score">
-        <div class="side me"><div class="tn">${esc(my.name)}</div><div class="pts">${f0(x.myPts)}</div><div class="proj">proj <b>${f0(x.myProj)}</b> · ${x.myGames} games left</div></div>
-        <div class="vs">vs</div>
-        <div class="side them"><div class="tn">${esc(x.opp.name)}</div><div class="pts">${f0(x.oppPts)}</div><div class="proj">proj <b>${f0(x.oppProj)}</b> · ${x.oppGames} games left</div></div>
+  return vBoard(strip) + vOverviewBody();
+}
+
+// Scoreboard with ‹ › to step through the viewed team's matchups: live week, final
+// results for past weeks, predicted scores for future ones.
+function vBoard(strip) {
+  const { an, model: m } = state;
+  const my = an.my;
+  const sched = A.teamSchedule(m, my.id, state.settings.basis);
+  const periods = sched.map(x => x.period);
+  let period = state.boardPeriod ?? m.currentPeriod;
+  if (periods.length && !periods.includes(period)) period = periods.reduce((a, b) => (Math.abs(b - m.currentPeriod) < Math.abs(a - m.currentPeriod) ? b : a));
+  const i = periods.indexOf(period);
+  const prev = periods[i - 1], next = periods[i + 1];
+  const live = period === m.currentPeriod;
+  const g = sched[i];
+  const label = period > m.regularPeriods ? `Playoffs · ${A.periodRange(m, period)}` : A.periodRange(m, period);
+  const nav = `<div class="board-top">
+      <div class="wknav">
+        <button class="arrow" data-act="wk" data-p="${prev ?? ''}" ${prev == null ? 'disabled' : ''} aria-label="Previous week">‹</button>
+        <span>Week ${period}</span>
+        <button class="arrow" data-act="wk" data-p="${next ?? ''}" ${next == null ? 'disabled' : ''} aria-label="Next week">›</button>
+        ${!live ? `<button class="wkback" data-act="wk" data-p="${m.currentPeriod}">This week</button>` : ''}
       </div>
-      <div class="odds"><span class="a">${wp}%</span><div class="bar"><i style="width:${wp}%"></i></div><span class="b">${100 - wp}%</span></div>
+      <span>${label}</span></div>`;
+  if (!g || !g.opp) return `<section class="board">${nav}<p class="muted" style="margin:18px 0">${g ? 'Bye week.' : 'No matchup scheduled.'}</p>${strip}</section>`;
+
+  // Live week uses the main analysis (lineup-aware); other weeks use the schedule projection.
+  const x = live && an.matchup && !an.matchup.bye ? an.matchup
+    : { opp: g.opp, myPts: g.myPts, oppPts: g.oppPts, myProj: g.myProj, oppProj: g.oppProj, myGames: g.myGames, oppGames: g.oppGames, winProb: g.winProb };
+  const future = period > m.currentPeriod;
+  const done = period < m.currentPeriod;
+  const big = (pts, proj) => (future ? proj : pts);
+  const sub = (proj, games) => (done ? 'final' : future ? `projected · ${games} games` : `proj <b>${f0(proj)}</b> · ${games} games left`);
+  const wp = Math.min(99, Math.max(1, Math.round((x.winProb ?? 0.5) * 100)));
+  const result = done ? `<div class="odds"><span class="a">${g.won ? 'WIN' : g.tie ? 'TIE' : 'LOSS'}</span><div class="bar"><i style="width:${g.won ? 100 : g.tie ? 50 : 0}%"></i></div><span class="b">${f0(Math.abs(g.myPts - g.oppPts))} pt margin</span></div>`
+    : `<div class="odds"><span class="a">${wp}%</span><div class="bar"><i style="width:${wp}%"></i></div><span class="b">${100 - wp}%</span></div>`;
+  return `<section class="board ${future ? 'future' : ''}">${nav}
+      <div class="score">
+        <div class="side me"><div class="tn">${esc(my.name)}</div><div class="pts">${f0(big(x.myPts, x.myProj))}</div><div class="proj">${sub(x.myProj, x.myGames)}</div></div>
+        <div class="vs">vs</div>
+        <div class="side them"><div class="tn"><button class="tlink" data-view="${x.opp.id}" title="View as this team">${esc(x.opp.name)}</button></div><div class="pts">${f0(big(x.oppPts, x.oppProj))}</div><div class="proj">${sub(x.oppProj, x.oppGames)}</div></div>
+      </div>
+      ${result}
       ${strip}
     </section>`;
-  } else h += `<section class="board">${strip}</section>`;
+}
+
+function vOverviewBody() {
+  const { an } = state;
+  let h = '';
 
   const picks = an.waivers.filter(w => !A.isOut(w.p)).sort((a, b) => b.weekGain - a.weekGain).slice(0, 6);
   h += `<div class="grid2">
@@ -659,7 +697,8 @@ function vDrawer() {
   return `<div class="scrim" data-act="close"></div>
   <aside class="drawer" role="dialog" aria-label="${esc(p.name)}">
     <div class="dh">
-      <div><div class="dn">${esc(p.name)}${badge(p)}</div><div class="pm">${esc(abbr(p))} · ${esc(p.eligible.join('/') || p.pos)} · ${ownerId == null ? (p.status === 'WAIVERS' ? 'On waivers' : 'Free agent') : esc(teamName(ownerId))}</div></div>
+      <div><div class="dn">${esc(p.name)}${badge(p)}</div><div class="pm">${esc(abbr(p))} · ${esc(p.eligible.join('/') || p.pos)} · ${ownerId == null ? (p.status === 'WAIVERS' ? 'On waivers' : 'Free agent') : esc(teamName(ownerId))}</div>
+        ${A.isOut(p) ? `<div class="injline">${esc([p.injuryType, A.returnLabel(p)].filter(Boolean).join(' · '))}</div>` : ''}</div>
       <button class="ghost" data-act="close" aria-label="Close">✕</button>
     </div>
     <div class="row">
@@ -777,6 +816,7 @@ document.addEventListener('click', async e => {
     await saveSettings(); render(); return;
   }
   if (act === 'home') { setView(starredTeam()); return; }
+  if (act === 'wk') { if (t.dataset.p !== '') { state.boardPeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
   if (act === 'trade-clear') { state.trade.give = []; state.trade.get = []; state.keepScroll = true; render(); return; }
   if (act === 'target') {
     const owner = +t.dataset.owner, id = +t.dataset.id;
@@ -807,7 +847,7 @@ document.addEventListener('click', async e => {
 });
 function setView(id) {
   if (id == null || !state.model?.teams.some(t => t.id === id)) return;
-  state.viewId = id; state.openPlayer = null; state.trade.give = [];
+  state.viewId = id; state.openPlayer = null; state.trade.give = []; state.boardPeriod = null;
   reanalyze(); render();
 }
 let noteTimer;

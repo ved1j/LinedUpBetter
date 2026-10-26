@@ -60,6 +60,17 @@ export function makeDemo() {
       ...extra,
     };
   };
+  const TYPES = ['Ankle', 'Knee', 'Hamstring', 'Back', 'Calf', 'Wrist'];
+  // Injured players get ESPN-style return info: most have an expected date.
+  const injure = p => {
+    p.injury = 'OUT';
+    p.injuryType = pick(TYPES);
+    if (r() < 0.75) {
+      p.returnSP = currentSP + int(1, 24);
+      const d = new Date(d1); d.setDate(d.getDate() + p.returnSP - 1);
+      p.returnDate = d.toLocaleDateString('en-CA');
+    }
+  };
 
   // Snake-draft 14 players onto each of 10 teams.
   const values = Array.from({ length: 140 }, () => 14 + 38 * r() ** 1.6).sort((a, b) => b - a);
@@ -75,13 +86,14 @@ export function makeDemo() {
   for (const t of teams) {
     t.roster.sort(() => r() - 0.5);
     t.roster.forEach((p, i) => { p.slot = SLOTS[i]; });
-    const ir = t.roster.find(p => p.slot === 13);
-    ir.injury = 'OUT';
+    injure(t.roster.find(p => p.slot === 13));
+    for (const p of t.roster) if (p.injury === 'OUT' && !p.injuryType) injure(p);
   }
 
   const freeAgents = Array.from({ length: 160 }, () => player(6 + 22 * r() ** 1.4, {
     owned: +rand(0, 45).toFixed(1), ownedChange: +rand(-4, 9).toFixed(1), status: r() < 0.15 ? 'WAIVERS' : 'FREEAGENT',
   }));
+  for (const p of freeAgents) if (p.injury === 'OUT') injure(p);
 
   // Round-robin schedule (circle method).
   const matchups = [];

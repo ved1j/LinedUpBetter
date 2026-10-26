@@ -74,7 +74,38 @@ export async function loadLeague({ leagueId, season }) {
     getJSON(`${BASE}/${season}?view=proTeamSchedules_wl`),
     getJSON(`${leagueUrl}?view=kona_player_info`, faFilter),
   ]);
-  return normalize(league, pro, fa, season, leagueId);
+  const model = normalize(league, pro, fa, season, leagueId);
+  await addInjuryReturns(model, leagueUrl);
+  return model;
+}
+
+// Expected return dates only come with ESPN's player-card view, so fetch it once for
+// every injured player in the league and the free-agent pool. Optional: if it fails,
+// projections fall back to status-only rules.
+async function addInjuryReturns(model, leagueUrl) {
+  const injured = [...model.teams.flatMap(t => t.roster), ...model.freeAgents].filter(p => p.injury && p.injury !== 'ACTIVE');
+  if (!injured.length) return;
+  try {
+    const data = await getJSON(`${leagueUrl}?view=kona_playercard`, {
+      players: { filterIds: { value: [...new Set(injured.map(p => p.id))] }, filterStatsForTopScoringPeriodIds: { value: 1 } },
+    });
+    const byId = new Map((data.players || []).map(e => [e.id ?? e.player?.id, e.player?.injuryDetails]));
+    const d1 = new Date(model.day1 + 'T12:00:00');
+    for (const p of injured) {
+      const det = byId.get(p.id);
+      if (!det) continue;
+      p.outForSeason = !!det.outForSeason;
+      p.injuryType = det.type || null;
+      const r = det.expectedReturnDate;
+      if (Array.isArray(r) && r.length >= 3) {
+        const back = new Date(r[0], r[1] - 1, r[2], 12);
+        p.returnDate = back.toLocaleDateString('en-CA');
+        p.returnSP = Math.round((back - d1) / 864e5) + 1;
+      }
+    }
+  } catch (e) {
+    console.warn('Injury return dates unavailable', e);
+  }
 }
 
 const etDate = ms => new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
