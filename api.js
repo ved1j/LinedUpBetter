@@ -247,6 +247,7 @@ function normalize(L, P, F, season, leagueId) {
     teams,
     matchups,
     freeAgents,
+    poolFAs: null, // set on the analysis copy (all free agents, incl. hidden ones)
     proTeams,
     myTeamId: null,
   };
@@ -372,6 +373,7 @@ function normPlayer(p, { slot = null, status = null, season, pts }) {
     slots: (p.eligibleSlots || []).filter(x => x < 12),
     injury: p.injuryStatus || (p.injured ? 'OUT' : 'ACTIVE'),
     owned: p.ownership?.percentOwned ?? null,
+    outForSeason: false, injuryType: null, returnDate: null, returnSP: null, // filled by addInjuryReturns
     adp: p.ownership?.averageDraftPosition || null,
     auction: p.ownership?.auctionValueAverage ?? null,
     espnRank: p.draftRanksByRankType?.STANDARD?.rank || null,

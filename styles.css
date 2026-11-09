@@ -474,3 +474,12 @@ tr.me .pbar span { color: var(--ink); }
 .usage.down b { color: var(--warn); }
 .toggle { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; line-height: 1.45; }
 .toggle input { width: auto; margin-top: 3px; accent-color: var(--volt); }
+
+/* ---------- trade finder */
+.finder-modes { margin-bottom: 10px; }
+.finder-pick { margin-bottom: 12px; }
+.fsel { width: 100%; max-width: 520px; font-size: 13px; padding: 7px 10px; }
+.kind.likely { background: var(--volt); color: var(--ink); }
+.kind.possible { border: 1px dashed var(--info); color: var(--info); }
+.g-me.down { color: var(--bad); }
+.lockmark { margin-left: 5px; font-size: 10px; }

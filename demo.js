@@ -48,6 +48,8 @@ export function makeDemo() {
     return {
       id: pid++, name, proTeamId: int(1, 30), pos, eligible: ELIG[pos], slots: [...new Set(ELIG[pos].flatMap(x => POS_SLOTS[x]))],
       injury: inj < 0.05 ? 'OUT' : inj < 0.11 ? 'DAY_TO_DAY' : 'ACTIVE',
+      outForSeason: false, injuryType: null, returnDate: null, returnSP: null,
+      owned: null, ownedChange: null, newsAt: null, adp: null, auction: null, espnRank: null,
       slot: null, status: null,
       stats: {
         season: { avg: +base.toFixed(1), gp },
@@ -136,6 +138,6 @@ export function makeDemo() {
     acqLimit: 4, day1: d1.toLocaleDateString('en-CA'),
     scoringType: 'H2H_POINTS', pointsEstimate: false, playoffRoundLength: 1, playoffSeeding: 'H2H_RECORD',
     scoring: Object.entries(DEFAULT_POINTS).map(([statId, points]) => ({ statId: +statId, points })),
-    teams, matchups, freeAgents, proTeams, myTeamId: 1,
+    teams, matchups, freeAgents, poolFAs: null, proTeams, myTeamId: 1,
   };
 }

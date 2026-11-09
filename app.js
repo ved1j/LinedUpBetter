@@ -49,6 +49,7 @@ const leagueKey = () => (state.settings.demo ? 'demo' : `${state.settings.league
 const starredTeam = () => state.settings.starred?.[leagueKey()] ?? null;
 const isStar = id => !!state.pnotes[id]?.star;
 const isHidden = id => !!state.pnotes[id]?.hidden;
+const isLocked = id => !!state.pnotes[id]?.lock;
 const xBtn = id => `<button class="xbtn" data-act="hide" data-id="${id}" title="Hide from waivers" aria-label="Hide from waivers">✕</button>`;
 const noteOf = id => state.pnotes[id]?.note || '';
 const savePNotes = () => store.set(`pnotes:${leagueKey()}`, state.pnotes);
@@ -94,7 +95,7 @@ function badge(p) {
 }
 function pCell(p, extra = '') {
   const pos = p.eligible?.length ? p.eligible.join('/') : p.pos;
-  const marks = (isStar(p.id) ? STAR : '') + (noteOf(p.id) ? '<span class="has-note" title="Has notes">✎</span>' : '');
+  const marks = (isStar(p.id) ? STAR : '') + (isLocked(p.id) ? '<span class="lockmark" title="Untouchable: never offered in trades">🔒</span>' : '') + (noteOf(p.id) ? '<span class="has-note" title="Has notes">✎</span>' : '');
   const news = hasFreshNews(p) ? `<span class="newsdot" title="News ${ago(p.newsAt)}: open for details"></span>` : '';
   return `<div class="pl"><span class="pn" data-player="${p.id}" title="Notes, news & details">${esc(p.name)}${marks}${news}${badge(p)}${extra}</span><span class="pm">${esc(abbr(p))} · ${esc(pos)}</span></div>`;
 }
@@ -189,7 +190,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:v7:${s.leagueId}:${s.season}`; // bump when the parser changes
+      const key = `cache:v8:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {
@@ -698,8 +699,25 @@ function getOdds() {
 }
 
 // ---- Trade tab
-const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}`;
-const tick = () => new Promise(r => setTimeout(r, 0));
+const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${state.an.my.roster.filter(p => isLocked(p.id)).map(p => p.id).join(',')}`;
+// Yield to the browser between chunks of work. MessageChannel isn't throttled in
+// background tabs the way setTimeout is, so long scans keep moving in a full-tab view.
+const yieldChannel = new MessageChannel();
+const yieldQueue = [];
+yieldChannel.port1.onmessage = () => yieldQueue.shift()?.();
+const tick = () => new Promise(r => { yieldQueue.push(r); yieldChannel.port2.postMessage(0); });
+// Run `work(item)` over a list in ~25 ms slices, yielding in between.
+async function chunked(items, work, onProgress, stillValid) {
+  let i = 0;
+  while (i < items.length) {
+    const until = performance.now() + 25;
+    while (i < items.length && performance.now() < until) work(items[i++]);
+    onProgress?.(i / items.length);
+    await tick();
+    if (stillValid && !stillValid()) return false;
+  }
+  return true;
+}
 
 // Scans every other team for trade ideas, one team per tick so the popup stays responsive.
 async function runTradeScan(force = false) {
@@ -714,11 +732,14 @@ async function runTradeScan(force = false) {
   // Screen on sampled days; refineIdeas re-checks the best ones on every day.
   const ctx = A.seasonContext(m, b, 48);
   const myBase = ctx.S(my.roster);
+  // A finder search is what you're waiting on, so the background scan steps aside.
+  const finderIdle = async () => { while (state.finder?.status === 'running') await new Promise(r => setTimeout(r, 60)); };
   for (const t of others) {
     const found = [];
     for (const type of A.DEAL_TYPES) {
+      await finderIdle();
       if (state.scan !== scan) return; // superseded (team switch, refresh…)
-      found.push(...A.tradeIdeasWith(m, my, t, b, ctx, myBase, [type]));
+      found.push(...A.tradeIdeasWith(m, my, t, b, ctx, myBase, [type], lockedIds()));
       await tick();
     }
     scan.ideas.push(...found);
@@ -759,13 +780,148 @@ function loadIntoAnalyzer(idea) {
 
 const TYPE_LABEL = { '1for1': '1-for-1', '2for1': '2-for-1', '1for2': '1-for-2', '2for2': '2-for-2' };
 
+// One proposed trade: who's involved, projected gain for both teams, why it helps you,
+// roster moves, and trade value. Shared by trade ideas and the trade finder.
+function dealCard(x, label, cls, openAttrs) {
+  const { an, model: m } = state;
+  const needs = getNeeds();
+  const mine = needs.byTeam[an.my.id];
+  const r = x.reason ||= A.tradeReason(m, an.my, x, state.settings.basis, { days: A.futureDays(m), scale: 1 });
+  const why = [];
+  if (r?.best) why.push(`${mine.weak.includes(r.best.id) ? 'Fixes your weak' : 'Stronger at'} ${needs.label(r.best.id)} (${signed(r.best.d, 1)} pts/day)`);
+  if (r && Math.abs(r.starts) >= 2) why.push(`${signed(r.starts)} games started`);
+  if (x.adds?.length) why.push(`you add FA ${x.adds.map(p => esc(p.name)).join(', ')}`);
+  if (x.theirAdds?.length) why.push(`they add FA ${x.theirAdds.map(p => esc(p.name)).join(', ')}`);
+  if (x.drops.length) why.push(`you drop ${x.drops.map(p => esc(p.name)).join(', ')}`);
+  if (x.theirDrops.length) why.push(`they drop ${x.theirDrops.map(p => esc(p.name)).join(', ')}`);
+  const side = ps => ps.map(p => `<div class="tchip">${pCell(p)}<span class="num">${f1(val(p))}</span></div>`).join('');
+  return `<div class="idea">
+    <div class="idea-top">
+      <span class="kind ${cls}">${label}</span>
+      <span class="dtype">${TYPE_LABEL[x.type] || ''}</span>
+      <span>with <button class="tlink" data-view="${x.partner.id}">${esc(x.partner.name)}</button></span>
+      <span class="spacer"></span>
+      <span class="g-me ${x.myGain < 0 ? 'down' : ''}" title="Your projected points, rest of season + playoffs">${signed(x.myGain)} you</span>
+      <span class="g-them ${x.theirGain >= 0 ? 'up' : 'down'}" title="Their projected points, rest of season + playoffs">${signed(x.theirGain)} them</span>
+    </div>
+    <div class="idea-swap"><div><div class="rk-label">You give</div>${side(x.give)}</div><div class="arrowx">⇄</div><div><div class="rk-label">You get</div>${side(x.get)}</div></div>
+    <div class="idea-foot"><span class="muted small">${why.join(' · ') || 'Better lineup fit for your roster.'} · <span title="Trade value = name + form: draft position, last season, ESPN projection and this season. Includes free-agent fill-ins.">trade value ${f1(x.mktGive)} for ${f1(x.mktGet)}${x.adds?.length || x.theirAdds?.length ? ' incl. FA' : ''}</span></span>
+      <button class="btn mini" ${openAttrs}>Open in analyzer</button></div>
+  </div>`;
+}
+
+// ---- Trade finder: aim the search at a player you want, one you'd move, or a position.
+const FINDER_MODES = { get: 'Get a player', away: 'Trade away', need: 'Fill a position' };
+const POSITIONS = ['PG', 'SG', 'SF', 'PF', 'C'];
+const lockedIds = () => new Set(state.an.my.roster.filter(p => isLocked(p.id)).map(p => p.id));
+const finderKey = f => `${scanKey()}:${f.mode}:${f.arg}:${[...lockedIds()].join(',')}`;
+
+async function runFinder() {
+  const f = state.finder;
+  if (f.arg == null || f.arg === '') return;
+  const key = finderKey(f);
+  if (f.key === key && f.status !== 'idle') return;
+  const m = state.model, my = state.an.my, b = state.settings.basis;
+  const run = { key };
+  Object.assign(f, { key, status: 'running', frac: 0, results: [], run });
+  state.keepScroll = true; render();
+  await tick();
+  const cands = A.finderCandidates(m, my, b, f.mode, f.arg, lockedIds());
+  const ctx = A.seasonContext(m, b, 48);
+  const screen = A.dealEvaluator(m, my, b, ctx.S, false);
+  const screened = [];
+  const live = () => f.run === run; // false once a newer search starts
+  // Rank by your gain, minus part of what it costs them: a deal that's fair on names but
+  // wrecks their lineup is a harder sell to a manager paying attention.
+  const rank = d => d.myGain + 0.6 * Math.min(0, d.theirGain);
+  if (!await chunked(cands, c => {
+    const d = screen(c.give, c.get, c.partner);
+    if (d.paperGive / d.paperGet >= 0.85) screened.push(d);
+  }, frac => finderProgress(0.75 * frac, `Testing ${cands.length.toLocaleString()} possible deals…`), live)) return;
+  // Exact re-check of the best, keeping variety (no package or return repeated 3+ times).
+  const days = A.futureDays(m);
+  const exact = A.dealEvaluator(m, my, b, r => A.projectDays(m, r, days, b).total, true);
+  const queue = [], seen = {};
+  for (const d of screened.sort((x, y) => rank(y) - rank(x))) {
+    const gk = d.give.map(p => p.id).sort().join(','), tk = `${d.partner.id}>${d.get.map(p => p.id).sort().join(',')}`;
+    if ((seen[gk] || 0) >= 2 || (seen[tk] || 0) >= 2) continue;
+    seen[gk] = (seen[gk] || 0) + 1; seen[tk] = (seen[tk] || 0) + 1;
+    queue.push(d);
+    if (queue.length >= 30) break;
+  }
+  const results = [];
+  if (!await chunked(queue, d => {
+    const x = exact(d.give, d.get, d.partner);
+    const acc = A.acceptance(x);
+    if (acc) results.push({ ...x, kind: acc });
+  }, frac => finderProgress(0.75 + 0.25 * frac, 'Double-checking the best on every remaining day…'), live)) return;
+  // Variety: no single player (other than the one you searched for) in more than 4 results.
+  const anchor = f.mode === 'need' ? null : f.arg, uses = {}, picked = [];
+  for (const x of results.sort((a, b) => rank(b) - rank(a))) {
+    const ids = [...x.give, ...x.get].map(p => p.id).filter(id => id !== anchor);
+    if (ids.some(id => (uses[id] || 0) >= 4)) continue;
+    ids.forEach(id => { uses[id] = (uses[id] || 0) + 1; });
+    picked.push(x);
+    if (picked.length >= 12) break;
+  }
+  f.results = picked;
+  f.status = 'done';
+  if (state.tab === 'trade') { state.keepScroll = true; render(); }
+}
+function finderProgress(frac, text) {
+  const bar = document.getElementById('finder-bar'), msg = document.getElementById('finder-msg');
+  if (bar) bar.style.width = `${(frac * 100).toFixed(0)}%`;
+  if (msg) msg.textContent = text;
+}
+function openFinder(mode, arg) {
+  state.finder = { mode, arg, status: 'idle' };
+  state.openPlayer = null;
+  setTab('trade');
+  runFinder();
+  document.getElementById('finder')?.scrollIntoView({ block: 'start' });
+}
+
+function vFinder() {
+  const { an, model: m } = state;
+  const f = state.finder ||= { mode: 'get', arg: null, status: 'idle' };
+  if (f.status === 'done' && f.key !== finderKey(f)) setTimeout(runFinder, 0); // data or settings changed
+  const tv = p => f1(A.marketValue(m, p, state.settings.basis));
+  const modes = Object.entries(FINDER_MODES).map(([k, t]) => `<button class="chip ${f.mode === k ? 'on' : ''}" data-act="fmode" data-v="${k}">${t}</button>`).join('');
+  let picker;
+  if (f.mode === 'get') {
+    const groups = m.teams.filter(t => t.id !== an.my.id).map(t => `<optgroup label="${esc(t.name)}">${t.roster.slice().sort((a, b) => val(b) - val(a))
+      .map(p => `<option value="${p.id}" ${f.arg === p.id ? 'selected' : ''}>${esc(p.name)} · ${f1(val(p))} proj/G · TV ${tv(p)}</option>`).join('')}</optgroup>`).join('');
+    picker = `<select class="fsel" data-act="farg"><option value="">Pick a player you want…</option>${groups}</select>`;
+  } else if (f.mode === 'away') {
+    picker = `<select class="fsel" data-act="farg"><option value="">Pick one of your players to move…</option>${an.my.roster.slice().sort((a, b) => val(b) - val(a))
+      .map(p => `<option value="${p.id}" ${f.arg === p.id ? 'selected' : ''} ${isLocked(p.id) ? 'disabled' : ''}>${isLocked(p.id) ? '🔒 ' : ''}${esc(p.name)} · ${f1(val(p))} proj/G · TV ${tv(p)}</option>`).join('')}</select>`;
+  } else {
+    picker = `<span class="chips" style="margin:0">${POSITIONS.map(p => `<button class="chip ${f.arg === p ? 'on' : ''}" data-act="fpos" data-v="${p}">${p}</button>`).join('')}</span>`;
+  }
+  let body = '';
+  if (f.status === 'running') {
+    body = `<div class="scan"><div class="scanbar"><i id="finder-bar" style="width:0%"></i></div><p class="muted small" id="finder-msg">Building possible deals…</p></div>`;
+  } else if (f.status === 'done') {
+    const label = { likely: 'Likely yes', possible: 'Possible' };
+    body = f.results.length
+      ? `<div class="ideas">${f.results.map((x, i) => dealCard(x, label[x.kind], x.kind, `data-act="fopen" data-i="${i}"`)).join('')}</div>
+         <p class="muted small">Sorted by what each deal adds to your lineup over the rest of the season + playoffs, discounted when it costs them a lot (a harder sell). Likely yes = they get at least as much trade value as they give; possible = within ~10%, expect a counter. A negative number for you = the price of the player you asked for.</p>`
+      : `<p class="muted">No deal they'd plausibly accept turned up. Try another player, or unlock someone on your roster.</p>`;
+  } else {
+    body = `<p class="muted small">${f.mode === 'get' ? 'Choose any player on another team: the finder builds packages from your roster (adding one of their role players to balance it when that helps) and keeps the ones they would plausibly accept.'
+      : f.mode === 'away' ? 'Choose one of your players: the finder checks every team for the best return, alone or with one of your lesser players added.'
+      : 'Choose a position: the finder looks at the best players there on other teams and what it would take to get them.'} Players you mark 🔒 untouchable are never offered.</p>`;
+  }
+  return `<section class="card" id="finder"><h3>Trade finder</h3>
+    <div class="chips finder-modes">${modes}</div>
+    <div class="finder-pick">${picker}</div>
+    ${body}</section>`;
+}
+
 function vTradeIdeas() {
   const { an, model: m } = state;
   const sc = state.scan;
   const f = state.ideaView ||= { kind: 'all', type: 'all', partner: 'all', limit: 10 };
-  const needs = getNeeds();
-  const mine = needs.byTeam[an.my.id];
-  const label = id => needs.label(id);
   const done = sc?.status === 'done';
   const head = `<h3>Trade ideas <span class="r muted small">${done ? `${sc.ideas.length} ideas from ${sc.total} teams · rest of season + playoffs <button class="link" data-act="rescan">Rescan</button>` : ''}</span></h3>`;
   if (!done) {
@@ -791,31 +947,7 @@ function vTradeIdeas() {
     list = [...top, ...later];
   }
   const shown = list.slice(0, f.limit);
-  const side = ps => ps.map(p => `<div class="tchip">${pCell(p)}<span class="num">${f1(val(p))}</span></div>`).join('');
-  const full = { days: A.futureDays(m), scale: 1 };
-  const cards = shown.map(x => {
-    const r = x.reason ||= A.tradeReason(m, an.my, x, state.settings.basis, full);
-    const why = [];
-    if (r?.best) why.push(`${mine.weak.includes(r.best.id) ? 'Fixes your weak' : 'Stronger at'} ${label(r.best.id)} (${signed(r.best.d, 1)} pts/day)`);
-    if (r && Math.abs(r.starts) >= 2) why.push(`${signed(r.starts)} games started`);
-    if (x.adds?.length) why.push(`you add FA ${x.adds.map(p => esc(p.name)).join(', ')}`);
-    if (x.theirAdds?.length) why.push(`they add FA ${x.theirAdds.map(p => esc(p.name)).join(', ')}`);
-    if (x.drops.length) why.push(`you drop ${x.drops.map(p => esc(p.name)).join(', ')}`);
-    if (x.theirDrops.length) why.push(`they drop ${x.theirDrops.map(p => esc(p.name)).join(', ')}`);
-    return `<div class="idea">
-      <div class="idea-top">
-        <span class="kind ${x.kind}">${A.IDEA_KINDS[x.kind]}</span>
-        <span class="dtype">${TYPE_LABEL[x.type] || ''}</span>
-        <span>with <button class="tlink" data-view="${x.partner.id}">${esc(x.partner.name)}</button></span>
-        <span class="spacer"></span>
-        <span class="g-me" title="Your projected points, rest of season + playoffs">${signed(x.myGain)} you</span>
-        <span class="g-them ${x.theirGain >= 0 ? 'up' : 'down'}" title="Their projected points, rest of season + playoffs">${signed(x.theirGain)} them</span>
-      </div>
-      <div class="idea-swap"><div><div class="rk-label">You give</div>${side(x.give)}</div><div class="arrowx">⇄</div><div><div class="rk-label">You get</div>${side(x.get)}</div></div>
-      <div class="idea-foot"><span class="muted small">${why.join(' · ') || 'Better lineup fit for your roster.'} · <span title="Trade value = name + form: draft position, last season, ESPN projection and this season. Includes free-agent fill-ins.">trade value ${f1(x.mktGive)} for ${f1(x.mktGet)}${x.adds?.length || x.theirAdds?.length ? ' incl. FA' : ''}</span></span>
-        <button class="btn mini" data-act="idea" data-i="${sc.ideas.indexOf(x)}">Open in analyzer</button></div>
-    </div>`;
-  }).join('');
+  const cards = shown.map(x => dealCard(x, A.IDEA_KINDS[x.kind], x.kind, `data-act="idea" data-i="${sc.ideas.indexOf(x)}"`)).join('');
   const more = list.length > shown.length
     ? `<button class="btn morebtn" data-act="more-ideas">Show ${Math.min(10, list.length - shown.length)} more <small>(${list.length - shown.length} left)</small></button>` : '';
   return `<section class="card">${head}${filters}
@@ -899,7 +1031,7 @@ function vTrade() {
   const bs = A.buySell(m, an.my.id, b);
   const bsRow = (x, act) => `<div class="pick">${pCell(x.p)}<div class="meta">${f1(x.p.stats.l15.avg)}<small> L15</small><br>${f1(x.p.stats.season.avg)}<small> season</small></div>
     <div class="gain ${x.d < 0 ? 'down' : ''}">${signed(x.d, 1)}</div>${act ? `<button class="btn mini" data-act="target" data-id="${x.p.id}" data-owner="${x.owner.id}">Target</button>` : ''}</div>`;
-  return `${vTradeIdeas()}
+  return `${vFinder()}${vTradeIdeas()}
     <div class="grid2" id="analyzer">
       <section class="card"><h3>You give <span class="r">${esc(an.my.name)}</span></h3><div class="tlist">${pick(mine, 'give')}</div></section>
       <section class="card"><h3>You get <select class="tsel" data-act="partner">${others.map(t => `<option value="${t.id}" ${t.id === tr.partner ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></h3><div class="tlist">${pick(theirs, 'get')}</div></section>
@@ -1056,7 +1188,8 @@ function vMarket(p) {
   const read = Math.abs(gap) < 3 ? 'Playing to their name.'
     : gap > 0 ? 'Playing above their name: a sell-high chip, but most managers won’t pay full price yet.'
     : 'Playing below their name: other managers still value them, so they cost more than current stats suggest.';
-  return `<div class="usage"><b>Name value ${f1(x.rep)}</b> (${bits}). This season ${f1(x.current)}. ${read}</div>`;
+  const hurt = x.health < 0.99 ? ` Injury cuts their trade value to ${Math.round(x.health * 100)}%.` : '';
+  return `<div class="usage"><b>Name value ${f1(x.rep)}</b> (${bits}). This season ${f1(x.current)}. ${read}${hurt}</div>`;
 }
 
 // Usage outlook for the player's next game, and when it changes over the next two weeks.
@@ -1109,7 +1242,9 @@ function vDrawer() {
     <div class="row">
       <button class="btn ${isStar(p.id) ? 'primary' : ''}" data-act="pstar">${isStar(p.id) ? '★ Starred' : '☆ Star player'}</button>
       ${ownerId == null ? `<button class="btn ${isHidden(p.id) ? 'warnbtn' : ''}" data-act="${isHidden(p.id) ? 'unhide' : 'hide'}" data-id="${p.id}">${isHidden(p.id) ? '↺ Unhide in waivers' : '✕ Hide from waivers'}</button>` : ''}
-      ${ownerId != null && ownerId !== state.an.my.id ? `<button class="btn" data-act="target" data-id="${p.id}" data-owner="${ownerId}">⇄ Trade for</button>` : ''}
+      ${ownerId != null && ownerId !== state.an.my.id ? `<button class="btn" data-act="target" data-id="${p.id}" data-owner="${ownerId}">⇄ Find trades for</button>` : ''}
+      ${ownerId === state.an.my.id ? `<button class="btn ${isLocked(p.id) ? 'warnbtn' : ''}" data-act="plock" title="Untouchable players are never offered in trade ideas or the finder">${isLocked(p.id) ? '🔒 Untouchable' : '🔓 Mark untouchable'}</button>
+        <button class="btn" data-act="faway" data-id="${p.id}">⇄ Shop this player</button>` : ''}
     </div>
     ${vWorth(p, ownerId)}
     ${vUsage(p)}
@@ -1237,11 +1372,22 @@ document.addEventListener('click', async e => {
   if (act === 'home') { setView(starredTeam()); return; }
   if (act === 'wk') { if (t.dataset.p !== '') { state.boardPeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
   if (act === 'trade-clear') { state.trade.give = []; state.trade.get = []; state.keepScroll = true; render(); return; }
-  if (act === 'target') {
-    const owner = +t.dataset.owner, id = +t.dataset.id;
-    if (state.trade.partner !== owner) { state.trade.partner = owner; state.trade.get = []; }
-    if (!state.trade.get.includes(id)) state.trade.get.push(id);
-    state.openPlayer = null; setTab('trade'); scrollToAnalyzer(); return;
+  if (act === 'target') { openFinder('get', +t.dataset.id); return; }
+  if (act === 'faway') { openFinder('away', +t.dataset.id); return; }
+  if (act === 'fmode') {
+    if (state.finder.mode !== t.dataset.v) state.finder = { mode: t.dataset.v, arg: null, status: 'idle' };
+    state.keepScroll = true; render(); return;
+  }
+  if (act === 'fpos') { state.finder.arg = t.dataset.v; state.finder.status = 'idle'; runFinder(); return; }
+  if (act === 'fopen') {
+    const x = state.finder.results[+t.dataset.i];
+    if (x) { loadIntoAnalyzer(x); render(); scrollToAnalyzer(); }
+    return;
+  }
+  if (act === 'plock') {
+    const id = state.openPlayer;
+    state.pnotes[id] = { ...state.pnotes[id], lock: !isLocked(id) };
+    await savePNotes(); state.keepScroll = true; render(); return;
   }
   if (act === 'idea') {
     const idea = state.scan?.ideas[+t.dataset.i];
@@ -1292,7 +1438,7 @@ function scrollToAnalyzer() {
 }
 function setView(id) {
   if (id == null || !state.model?.teams.some(t => t.id === id)) return;
-  state.viewId = id; state.openPlayer = null; state.trade.give = []; state.boardPeriod = null;
+  state.viewId = id; state.openPlayer = null; state.trade.give = []; state.boardPeriod = null; state.finder = null;
   reanalyze(); render();
 }
 let noteTimer;
@@ -1318,6 +1464,7 @@ document.addEventListener('change', async e => {
   const act = e.target.dataset.act;
   if (act === 'view') { setView(+e.target.value); return; }
   if (act === 'partner') { state.trade.partner = +e.target.value; state.trade.get = []; render(); return; }
+  if (act === 'farg') { state.finder.arg = e.target.value ? +e.target.value : null; state.finder.status = 'idle'; runFinder(); return; }
   if (act === 'ip') { const v = e.target.value; Object.assign(state.ideaView, { partner: v === 'all' ? 'all' : +v, limit: 10 }); state.keepScroll = true; render(); return; }
   if (e.target.dataset.trade) {
     const side = e.target.dataset.trade, id = +e.target.value;

@@ -77,15 +77,17 @@ function teamDelta(m, u, proTeamId, sp) {
   }
   return d;
 }
-export function usageFactor(m, p, sp, basis) {
-  if (!adjustments.usage || !p.proTeamId) return 1;
-  const u = usageCtx(m, basis);
-  const d = teamDelta(m, u, p.proTeamId, sp);
-  const me = u.own.get(p.id);
+function usageMult(m, u, team, me, sp) {
+  const d = teamDelta(m, u, team, sp);
   // A player's own absence or return doesn't change their own share.
   const delta = d.delta - (me ? me.v * (me.base - presence(m, me, sp)) : 0);
   if (!(d.active > 0) || !delta) return 1;
   return 1 + Math.max(-USAGE_CAP, Math.min(USAGE_CAP, USAGE_SHARE * delta / Math.max(d.active, u.norm)));
+}
+export function usageFactor(m, p, sp, basis) {
+  if (!adjustments.usage || !p.proTeamId) return 1;
+  const u = usageCtx(m, basis);
+  return usageMult(m, u, p.proTeamId, u.own.get(p.id), sp);
 }
 const restFactor = (m, p, sp, v) => (adjustments.rest && v >= REST_STAR && isB2B(m, p, sp) ? REST_FACTOR : 1);
 export const dayFactor = (m, p, sp, basis, v) => usageFactor(m, p, sp, basis) * restFactor(m, p, sp, v);
@@ -179,35 +181,43 @@ const SLOT_RANK = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 7: 1, 8: 1, 9: 1, 10: 1, 5: 2,
 // Best lineup for one day: players are taken best-first and placed with augmenting
 // paths (bumping an already-placed player to another slot they can play). Greedy by
 // value + augmenting paths is optimal here, because lineups form a transversal matroid.
-// Slot orders and each player's eligible slot indices are cached per slot layout: this
-// runs thousands of times during trade scans.
+// Slot orders and each player's eligible slots (as a bitmask over slot indices) are
+// cached per slot layout: this runs hundreds of thousands of times during trade scans.
 const orderCache = new Map();
 const eligCache = new WeakMap();
+function eligMask(p, slots, key) {
+  let byKey = eligCache.get(p);
+  if (!byKey) eligCache.set(p, byKey = new Map());
+  let mask = byKey.get(key);
+  if (mask === undefined) {
+    mask = 0;
+    for (let i = 0; i < slots.length; i++) if (!p.slots?.length || p.slots.includes(slots[i])) mask |= 1 << i;
+    byKey.set(key, mask);
+  }
+  return mask;
+}
 export function fillLineup(players, slots, key = slots.join(',')) {
-  const owner = new Array(slots.length).fill(-1);
+  const n = slots.length;
+  const owner = new Array(n).fill(-1);
   let order = orderCache.get(key);
   if (!order) orderCache.set(key, order = slots.map((s, i) => i).sort((a, b) => (SLOT_RANK[slots[a]] ?? 3) - (SLOT_RANK[slots[b]] ?? 3)));
-  const fits = pl => {
-    let byKey = eligCache.get(pl.p);
-    if (!byKey) eligCache.set(pl.p, byKey = new Map());
-    let idx = byKey.get(key);
-    if (!idx) byKey.set(key, idx = pl.p.slots?.length ? order.filter(i => pl.p.slots.includes(slots[i])) : order);
-    return idx;
-  };
-  const elig = players.map(fits);
+  const masks = players.map(pl => eligMask(pl.p, slots, key));
   const used = [];
-  players.forEach((pl, i) => {
-    const seen = new Set();
-    const place = pi => {
-      for (const si of elig[pi]) {
-        if (seen.has(si)) continue;
-        seen.add(si);
-        if (owner[si] === -1 || place(owner[si])) { owner[si] = pi; return true; }
-      }
-      return false;
-    };
-    if (place(i)) used.push(pl);
-  });
+  let visited = 0;
+  const place = pi => {
+    const mask = masks[pi];
+    for (const si of order) {
+      const bit = 1 << si;
+      if (!(mask & bit) || (visited & bit)) continue;
+      visited |= bit;
+      if (owner[si] === -1 || place(owner[si])) { owner[si] = pi; return true; }
+    }
+    return false;
+  };
+  for (let i = 0; i < players.length && used.length < n; i++) {
+    visited = 0;
+    if (place(i)) used.push(players[i]);
+  }
   return { used, owner };
 }
 
@@ -218,19 +228,37 @@ export function fillLineup(players, slots, key = slots.join(',')) {
 export function projectDays(m, roster, sps, basis, track = false) {
   const slots = startingSlots(m);
   const slotsKey = slots.join(',');
-  const vals = new Map(roster.map(p => [p, value(p, basis)]));
   const now = Date.now();
+  const cur = new Set(m.periods[m.currentPeriod] || []);
+  const u = adjustments.usage ? usageCtx(m, basis) : null;
+  // Everything about a player that doesn't change day to day, looked up once. Same rules
+  // as gameLeft / availableOn / dtdFactor / dayFactor, inlined: this is the hot loop.
+  const info = roster.map(p => {
+    const v = value(p, basis);
+    const out = isOut(p);
+    return {
+      p, v, games: m.proTeams[p.proTeamId]?.games || {},
+      backSP: !out ? 0 : p.outForSeason || !p.returnSP ? Infinity : p.returnSP,
+      dtd: isDTD(p), star: adjustments.rest && v >= REST_STAR,
+      team: p.proTeamId, me: u && p.proTeamId ? u.own.get(p.id) : null,
+    };
+  });
   const players = track ? new Map(roster.map(p => [p, { g: 0, pts: 0, avail: 0, bench: 0, out: 0 }])) : null;
   const slotPts = track ? {} : null;
   let total = 0, games = 0;
   const days = [];
   for (const sp of sps) {
     const playing = [];
-    for (const p of roster) {
-      if (!gameLeft(m, p, sp, now)) continue;
-      if (!availableOn(m, p, sp)) { if (track) players.get(p).out++; continue; }
-      const v = vals.get(p);
-      playing.push({ p, v: v * dtdFactor(m, p, sp) * dayFactor(m, p, sp, basis, v) });
+    const isToday = sp === m.currentSP, inCur = cur.has(sp);
+    for (const x of info) {
+      const g = x.games[sp];
+      if (!g || (isToday && g.start && g.start <= now)) continue; // no game, or already tipped off
+      if (sp < x.backSP) { if (track) players.get(x.p).out++; continue; }
+      let v = x.v;
+      if (x.dtd && inCur) v *= 0.8;
+      if (u && x.team) v *= usageMult(m, u, x.team, x.me, sp);
+      if (x.star && x.games[sp - 1]) v *= REST_FACTOR;
+      playing.push({ p: x.p, v });
     }
     playing.sort((a, b) => b.v - a.v);
     const today = sp === m.currentSP;
@@ -413,8 +441,18 @@ export function marketParts(m, p, basis) {
   const current = value(p, 'smart');
   const gp = s.season?.gp || 0;
   const wc = rep == null ? 1 : Math.min(0.7, 0.15 + gp / 60);
-  const v = rep == null ? current : (1 - wc) * rep + wc * current;
-  const out = { value: v, rep, current, draft, prev, proj, wc, adp: p.adp, auction: p.auction, espnRank: p.espnRank };
+  // Injuries cut trade value: by the share of remaining games they're expected to play
+  // (managers still pay a little for a stash), much more if there's no return date.
+  let health = 1;
+  if (p.outForSeason) health = 0.05;
+  else if (isOut(p) && !p.returnSP) health = 0.45;
+  else if (isOut(p)) {
+    const days = c.days || (c.days = futureDays(m));
+    const sched = days.filter(sp => gameOn(m, p, sp)).length;
+    health = sched ? 0.4 + 0.6 * (days.filter(sp => gameOn(m, p, sp) && availableOn(m, p, sp)).length / sched) : 1;
+  }
+  const v = (rep == null ? current : (1 - wc) * rep + wc * current) * health;
+  const out = { value: v, rep, current, draft, prev, proj, wc, health, adp: p.adp, auction: p.auction, espnRank: p.espnRank };
   c.cache.set(p.id, out);
   return out;
 }
@@ -447,9 +485,15 @@ export function applyTrade(roster, give, get, basis, fill = null) {
     after = after.filter(p => p !== d);
   }
   if (fill && after.length < roster.length) {
+    // fill.fas is already sorted best-first and limited to players who can play.
     const owned = new Set(after.map(p => p.id));
-    const pool = (fill.fas || []).filter(p => !owned.has(p.id) && !giveIds.has(p.id) && !p.outForSeason && (!isOut(p) || p.returnSP))
-      .sort((a, b) => value(b, basis) - value(a, basis)).slice(0, fill.S ? 6 : after.length < roster.length ? roster.length - after.length : 0);
+    const want = fill.S ? 6 : roster.length - after.length;
+    const pool = [];
+    for (const p of fill.fas || []) {
+      if (owned.has(p.id) || giveIds.has(p.id)) continue;
+      pool.push(p);
+      if (pool.length >= want) break;
+    }
     while (after.length < roster.length && pool.length) {
       let best = pool[0];
       if (fill.S && pool.length > 1) {
@@ -463,14 +507,34 @@ export function applyTrade(roster, give, get, basis, fill = null) {
   }
   return { after, drops, adds };
 }
-const faPool = m => m.poolFAs || m.freeAgents || [];
+// Free agents who can play (not out for the season, not out with no return date),
+// best Proj/G first. Sorted once per model + basis: trade scans fill spots thousands of times.
+const faMemo = new WeakMap();
+function faPool(m, basis) {
+  let byBasis = faMemo.get(m);
+  if (!byBasis) faMemo.set(m, byBasis = new Map());
+  let list = byBasis.get(basis);
+  if (!list) {
+    list = (m.poolFAs || m.freeAgents || []).filter(p => !p.outForSeason && (!isOut(p) || p.returnSP))
+      .map(p => [p, value(p, basis)]).sort((a, b) => b[1] - a[1]).map(([p]) => p);
+    byBasis.set(basis, list);
+  }
+  return list;
+}
 
 // What the free agents a trade lets a team pick up would be worth on their own (added by
 // dropping its least useful players instead of trading). Taken out of a trade's value,
 // so a 2-for-1 isn't credited for a waiver move the team could make anyway.
-export function faAlone(roster, adds, basis, S) {
+export function faAlone(roster, adds, basis, S, base = null) {
   if (!adds?.length) return 0;
-  return Math.max(0, S(applyTrade(roster, [], adds, basis).after) - S(roster));
+  return Math.max(0, S(applyTrade(roster, [], adds, basis).after) - (base ?? S(roster)));
+}
+// Same, memoized per team + pickup: within one scan it's always the same answer.
+function faAloneMemo(memo, team, adds, basis, S, base) {
+  if (!adds?.length) return 0;
+  const k = `${team.id}:${adds.map(p => p.id).join(',')}`;
+  if (!memo.has(k)) memo.set(k, faAlone(team.roster, adds, basis, S, base));
+  return memo.get(k);
 }
 
 // Projected points for a team before/after a trade, in each window.
@@ -478,7 +542,7 @@ export function tradeImpact(m, team, give, get, basis) {
   const before = team.roster;
   // Pick any free-agent fill-in on every remaining day, exactly like the trade ideas do.
   const days = futureDays(m);
-  const { after, drops, adds } = applyTrade(before, give, get, basis, { fas: faPool(m), S: r => projectDays(m, r, days, basis).total });
+  const { after, drops, adds } = applyTrade(before, give, get, basis, { fas: faPool(m, basis), S: r => projectDays(m, r, days, basis).total });
   const w = seasonWindows(m);
   const calc = r => ({
     week: projectDays(m, r, w.week, basis).total,
@@ -752,25 +816,26 @@ export function teamNeeds(m, basis) {
 // scored on rest-of-season + playoff projections for BOTH rosters, so suggestions fix a
 // real lineup need for you without obviously hurting them.
 export const DEAL_TYPES = ['1for1', '2for1', '1for2', '2for2'];
-export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TYPES) {
+export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TYPES, locked = new Set()) {
   const v = p => value(p, basis);
   const theirBase = ctx.S(other.roster);
   const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 11);
-  const mine = pieces(my), theirs = pieces(other);
+  const mine = pieces(my).filter(p => !locked.has(p.id)), theirs = pieces(other);
   const sum = ps => ps.reduce((a, p) => a + v(p), 0);
   // "On paper" = trade value (name + form, see marketParts). In uneven deals the side
   // that ends up a player short is credited with the best free agent it can add, plus a
   // mild star premium (one 45 FP/G player still edges a 30 + 15: lineup spots are limited).
   const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
-  const fill = { fas: faPool(m) };
+  const fill = { fas: faPool(m, basis) };
+  const faMemo = ctx.faMemo || (ctx.faMemo = new Map());
   const out = [];
   const consider = (give, get) => {
     const a = applyTrade(my.roster, give, get, basis, fill);
     // Screening on sampled days is loose on purpose; refineIdeas re-checks exactly.
-    const myGain = ctx.S(a.after) - myBase - faAlone(my.roster, a.adds, basis, ctx.S);
+    const myGain = ctx.S(a.after) - myBase - faAloneMemo(faMemo, my, a.adds, basis, ctx.S, myBase);
     if (myGain < 0) return;
     const z = applyTrade(other.roster, get, give, basis, fill);
-    const theirGain = ctx.S(z.after) - theirBase - faAlone(other.roster, z.adds, basis, ctx.S);
+    const theirGain = ctx.S(z.after) - theirBase - faAloneMemo(faMemo, other, z.adds, basis, ctx.S, theirBase);
     const giveV = sum(give), getV = sum(get);
     const paperGive = paper([...give, ...z.adds]), paperGet = paper([...get, ...a.adds]);
     // Same acceptance rule as the exact pass, with slack for sampling noise.
@@ -787,18 +852,20 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
     const r = v(b) / Math.max(1, v(a));
     if (r >= 0.75 && r <= 1.35) consider([a], [b]);
   }
-  if (types.includes('2for1')) for (let i = 0; i < mine.length; i++) for (let j = i + 1; j < mine.length; j++) {
-    const two = v(mine[i]) + v(mine[j]);
+  const mine9 = mine.slice(0, 9);
+  if (types.includes('2for1')) for (let i = 0; i < mine9.length; i++) for (let j = i + 1; j < mine9.length; j++) {
+    const two = v(mine9[i]) + v(mine9[j]);
     for (const b of theirs.slice(0, 6)) {
       // 2-for-1: the single player is better than either, worth 60–90% of the pair.
-      if (v(b) <= Math.max(v(mine[i]), v(mine[j])) || v(b) > 0.9 * two || v(b) < 0.6 * two) continue;
-      consider([mine[i], mine[j]], [b]);
+      if (v(b) <= Math.max(v(mine9[i]), v(mine9[j])) || v(b) > 0.9 * two || v(b) < 0.6 * two) continue;
+      consider([mine9[i], mine9[j]], [b]);
     }
   }
-  if (types.includes('1for2')) for (const a of mine.slice(0, 6)) for (let i = 0; i < theirs.length; i++) for (let j = i + 1; j < theirs.length; j++) {
-    const two = v(theirs[i]) + v(theirs[j]);
-    if (v(a) <= Math.max(v(theirs[i]), v(theirs[j])) || v(a) > 0.9 * two || v(a) < 0.6 * two) continue;
-    consider([a], [theirs[i], theirs[j]]);
+  const theirs9 = theirs.slice(0, 9);
+  if (types.includes('1for2')) for (const a of mine.slice(0, 6)) for (let i = 0; i < theirs9.length; i++) for (let j = i + 1; j < theirs9.length; j++) {
+    const two = v(theirs9[i]) + v(theirs9[j]);
+    if (v(a) <= Math.max(v(theirs9[i]), v(theirs9[j])) || v(a) > 0.9 * two || v(a) < 0.6 * two) continue;
+    consider([a], [theirs9[i], theirs9[j]]);
   }
   if (types.includes('2for2')) {
     // 2-for-2: swap two of your top players for two of theirs with similar total value.
@@ -849,23 +916,94 @@ function rateIdea(myGain, theirGain, giveV, getV) {
 // Re-score screened ideas on every remaining day (no sampling), so the numbers match
 // the trade analyzer exactly. Returns a function that refines one idea (or null if it
 // no longer holds up), so callers can work through a long list in small steps.
-export function makeRefiner(m, my, basis) {
-  const days = futureDays(m);
-  const S = roster => projectDays(m, roster, days, basis).total;
+// Scores one deal for both teams: projected points gained (net of any free agent a
+// short-handed side picks up), and what each side gets on paper (trade value with a mild
+// star premium) and in plain trade value. `S` scores a roster; with exact = true a free
+// agent fill-in is picked for lineup fit (otherwise the top Proj/G one, for screening).
+export function dealEvaluator(m, my, basis, S, exact = false) {
   const base = new Map();
   const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster)); return base.get(t.id); };
-  const fill = { fas: faPool(m), S };
+  const fill = exact ? { fas: faPool(m, basis), S } : { fas: faPool(m, basis) };
   const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
-  return x => {
-    const a = applyTrade(my.roster, x.give, x.get, basis, fill);
-    const z = applyTrade(x.partner.roster, x.get, x.give, basis, fill);
-    const myGain = S(a.after) - baseOf(my) - faAlone(my.roster, a.adds, basis, S);
-    const theirGain = S(z.after) - baseOf(x.partner) - faAlone(x.partner.roster, z.adds, basis, S);
-    const paperGive = paper([...x.give, ...z.adds]), paperGet = paper([...x.get, ...a.adds]);
-    const mkt = ps => ps.reduce((t, p) => t + marketValue(m, p, basis), 0);
-    const rated = rateIdea(myGain, theirGain, paperGive, paperGet);
-    return rated ? { ...x, myGain, theirGain, paperGive, paperGet, mktGive: mkt([...x.give, ...z.adds]), mktGet: mkt([...x.get, ...a.adds]), drops: a.drops, theirDrops: z.drops, adds: a.adds, theirAdds: z.adds, ...rated } : null;
+  const mkt = ps => ps.reduce((a, p) => a + marketValue(m, p, basis), 0);
+  const sum = ps => ps.reduce((a, p) => a + value(p, basis), 0);
+  const faMemo = new Map();
+  return (give, get, partner) => {
+    const a = applyTrade(my.roster, give, get, basis, fill);
+    const z = applyTrade(partner.roster, get, give, basis, fill);
+    return {
+      partner, give, get, type: `${give.length}for${get.length}`,
+      myGain: S(a.after) - baseOf(my) - faAloneMemo(faMemo, my, a.adds, basis, S, baseOf(my)),
+      theirGain: S(z.after) - baseOf(partner) - faAloneMemo(faMemo, partner, z.adds, basis, S, baseOf(partner)),
+      giveV: sum(give), getV: sum(get),
+      paperGive: paper([...give, ...z.adds]), paperGet: paper([...get, ...a.adds]),
+      mktGive: mkt([...give, ...z.adds]), mktGet: mkt([...get, ...a.adds]),
+      drops: a.drops, theirDrops: z.drops, adds: a.adds, theirAdds: z.adds,
+    };
   };
+}
+
+export function makeRefiner(m, my, basis) {
+  const days = futureDays(m);
+  const evalDeal = dealEvaluator(m, my, basis, roster => projectDays(m, roster, days, basis).total, true);
+  return x => {
+    const d = evalDeal(x.give, x.get, x.partner);
+    const rated = rateIdea(d.myGain, d.theirGain, d.paperGive, d.paperGet);
+    return rated ? { ...x, ...d, ...rated } : null;
+  };
+}
+
+// ---- Trade finder
+// Would the other manager plausibly accept, judged on trade value (name + form)?
+export function acceptance(d) {
+  const r = d.paperGive / Math.max(1e-9, d.paperGet);
+  return r >= 0.97 ? 'likely' : r >= 0.88 ? 'possible' : null;
+}
+
+// Candidate deals for one finder search. Your side never includes locked players.
+//  get:  a specific player on another team, for one or two of yours, optionally with one
+//        of their other players added to balance it.
+//  away: one of your players, for one or two of theirs, from every team, optionally with
+//        one of your lesser players added.
+//  need: the best players at a position on other teams, for one or two of yours.
+export function finderCandidates(m, my, basis, mode, arg, locked = new Set()) {
+  const v = p => value(p, basis), mv = p => marketValue(m, p, basis);
+  const usable = p => !p.outForSeason && v(p) >= 5;
+  const mine = my.roster.filter(p => usable(p) && !locked.has(p.id)).sort((a, b) => mv(b) - mv(a));
+  const pairs = list => list.flatMap((a, i) => list.slice(i + 1).map(b => [a, b]));
+  const mk = ps => ps.reduce((a, p) => a + mv(p), 0);
+  // Loose trade-value band; the exact pass (with free-agent fill-ins) decides.
+  const near = (give, get) => { const r = mk(give) / Math.max(1, mk(get)); return r >= 0.75 && r <= 1.6; };
+  const out = [];
+  const add = (give, get, partner) => { if (near(give, get)) out.push({ give, get, partner }); };
+  const gives = [...mine.map(p => [p]), ...pairs(mine.slice(0, 10))];
+  if (mode === 'get') {
+    const partner = m.teams.find(t => t.roster.some(p => p.id === arg));
+    const target = partner?.roster.find(p => p.id === arg);
+    if (!target || partner.id === my.id) return [];
+    const fillers = partner.roster.filter(p => p !== target && usable(p)).sort((a, b) => v(b) - v(a)).slice(0, 8);
+    for (const g of gives) {
+      add(g, [target], partner);
+      for (const f of fillers) add(g, [target, f], partner);
+    }
+  } else if (mode === 'away') {
+    const me = my.roster.find(p => p.id === arg);
+    if (!me) return [];
+    const sweeteners = mine.filter(p => p !== me && mv(p) < mv(me)).slice(0, 6);
+    const myGives = [[me], ...sweeteners.map(f => [me, f])];
+    for (const t of m.teams) {
+      if (t.id === my.id) continue;
+      const theirs = t.roster.filter(usable).sort((a, b) => v(b) - v(a));
+      const gets = [...theirs.slice(0, 10).map(p => [p]), ...pairs(theirs.slice(0, 7))];
+      for (const g of myGives) for (const x of gets) add(g, x, t);
+    }
+  } else if (mode === 'need') {
+    const targets = m.teams.filter(t => t.id !== my.id)
+      .flatMap(t => t.roster.filter(p => usable(p) && (p.eligible || []).includes(arg)).map(p => ({ p, t })))
+      .sort((a, b) => v(b.p) - v(a.p)).slice(0, 12);
+    for (const { p, t } of targets) for (const g of [...mine.map(q => [q]), ...pairs(mine.slice(0, 8))]) add(g, [p], t);
+  }
+  return out;
 }
 export function refineIdeas(m, my, ideas, basis, top = 80) {
   const refine = makeRefiner(m, my, basis);
