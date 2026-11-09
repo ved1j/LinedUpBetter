@@ -14,6 +14,92 @@ export function availableOn(m, p, sp) {
 }
 // Day-to-day discount applies to the current matchup only.
 const dtdFactor = (m, p, sp) => (isDTD(p) && (m.periods[m.currentPeriod] || []).includes(sp) ? 0.8 : 1);
+
+// ---- Outside factors: teammate usage and back-to-back rest
+// Teammate usage: when a regular is out, their production doesn't vanish, and teammates
+// absorb part of it. Each player's averages were built with a certain supporting cast
+// (how often each teammate actually played so far). On any future day, compare that to
+// who's expected to play: more missing than usual means a usage bump for everyone who
+// plays, a star returning after missing time means a dip. 60% of the missing production
+// is spread over the team in proportion to each player's own (one star out ≈ +10–13%
+// for teammates), capped at ±30%.
+// Back-to-back rest: stars (35+ Proj/G) sometimes sit the second night, so -5% there.
+export const adjustments = { usage: true, rest: true };
+export const setAdjustments = o => Object.assign(adjustments, o);
+const USAGE_SHARE = 0.6, USAGE_CAP = 0.3, REST_STAR = 35, REST_FACTOR = 0.95;
+const usageMemo = new WeakMap();
+
+function usageCtx(m, basis) {
+  let byBasis = usageMemo.get(m);
+  if (!byBasis) usageMemo.set(m, byBasis = new Map());
+  let u = byBasis.get(basis);
+  if (u) return u;
+  // Every player we know about (rostered + free agents), grouped by NBA team.
+  const pool = new Map();
+  for (const t of m.teams) for (const p of t.roster) pool.set(p.id, p);
+  for (const p of m.poolFAs || m.freeAgents) if (!pool.has(p.id)) pool.set(p.id, p);
+  const played = {};
+  for (const [id, t] of Object.entries(m.proTeams)) played[id] = Object.keys(t.games).filter(sp => +sp < m.currentSP).length;
+  const byTeam = new Map(), own = new Map();
+  for (const p of pool.values()) {
+    const v = value(p, basis);
+    if (v < 8 || !p.proTeamId) continue;
+    const g = played[p.proTeamId] || 0;
+    const base = g >= 3 ? Math.min(1, (p.stats?.season?.gp || 0) / g) : 1; // share of team games they played
+    const x = { p, v, base };
+    own.set(p.id, x);
+    if (!byTeam.has(p.proTeamId)) byTeam.set(p.proTeamId, []);
+    byTeam.get(p.proTeamId).push(x);
+  }
+  // Spread over a typical team's tracked production, not just whoever is tracked on a
+  // thin team: bench players we don't track soak up minutes too.
+  const totals = [...byTeam.values()].map(xs => xs.reduce((a, x) => a + x.v * Math.max(x.base, 0.85), 0)).sort((a, b) => a - b);
+  const norm = totals.length ? totals[Math.floor(totals.length / 2)] : 0;
+  u = { byTeam, own, norm, cache: new Map() };
+  byBasis.set(basis, u);
+  return u;
+}
+// Expected share of games a player plays on a day: 0 if injured; otherwise their usual
+// rate (regulars miss a few games anyway), but at least 85% once healthy, so only real
+// changes (an injury now, or a long absence ending) shift teammates' usage.
+const presence = (m, x, sp) => (availableOn(m, x.p, sp) ? Math.max(x.base, 0.85) : 0);
+function teamDelta(m, u, proTeamId, sp) {
+  const key = proTeamId * 1000 + sp;
+  let d = u.cache.get(key);
+  if (!d) {
+    let delta = 0, active = 0;
+    for (const x of u.byTeam.get(proTeamId) || []) {
+      const now = presence(m, x, sp);
+      delta += x.v * (x.base - now);
+      active += x.v * now;
+    }
+    u.cache.set(key, d = { delta, active });
+  }
+  return d;
+}
+export function usageFactor(m, p, sp, basis) {
+  if (!adjustments.usage || !p.proTeamId) return 1;
+  const u = usageCtx(m, basis);
+  const d = teamDelta(m, u, p.proTeamId, sp);
+  const me = u.own.get(p.id);
+  // A player's own absence or return doesn't change their own share.
+  const delta = d.delta - (me ? me.v * (me.base - presence(m, me, sp)) : 0);
+  if (!(d.active > 0) || !delta) return 1;
+  return 1 + Math.max(-USAGE_CAP, Math.min(USAGE_CAP, USAGE_SHARE * delta / Math.max(d.active, u.norm)));
+}
+const restFactor = (m, p, sp, v) => (adjustments.rest && v >= REST_STAR && isB2B(m, p, sp) ? REST_FACTOR : 1);
+export const dayFactor = (m, p, sp, basis, v) => usageFactor(m, p, sp, basis) * restFactor(m, p, sp, v);
+
+// Which teammates explain a usage change on a day: regulars out, or players back after
+// missing a lot of games.
+export function usageReasons(m, p, sp, basis) {
+  const mates = (usageCtx(m, basis).byTeam.get(p.proTeamId) || []).filter(x => x.p.id !== p.id);
+  return {
+    factor: usageFactor(m, p, sp, basis),
+    out: mates.filter(x => x.base >= 0.5 && !availableOn(m, x.p, sp)).sort((a, b) => b.v - a.v).map(x => x.p),
+    back: mates.filter(x => x.base < 0.5 && availableOn(m, x.p, sp)).sort((a, b) => b.v - a.v).map(x => x.p),
+  };
+}
 export function returnLabel(p) {
   if (!isOut(p)) return '';
   if (p.outForSeason) return 'Out for season';
@@ -143,7 +229,8 @@ export function projectDays(m, roster, sps, basis, track = false) {
     for (const p of roster) {
       if (!gameLeft(m, p, sp, now)) continue;
       if (!availableOn(m, p, sp)) { if (track) players.get(p).out++; continue; }
-      playing.push({ p, v: vals.get(p) * dtdFactor(m, p, sp) });
+      const v = vals.get(p);
+      playing.push({ p, v: v * dtdFactor(m, p, sp) * dayFactor(m, p, sp, basis, v) });
     }
     playing.sort((a, b) => b.v - a.v);
     const today = sp === m.currentSP;
@@ -302,10 +389,13 @@ export function seasonWindows(m) {
 // Roster after a trade. Incoming players arrive on the bench; if the team now has more
 // players than before, it drops its least useful ones (out-for-season first, then
 // lowest value), never a player it just received.
-export function applyTrade(roster, give, get, basis) {
+// With `fill` ({ fas, S? }), a team left with an open spot (gave more than it got)
+// picks up the best available free agent: the highest Proj/G, or, if a scorer S is
+// given, whichever of the top six fits its lineup best.
+export function applyTrade(roster, give, get, basis, fill = null) {
   const giveIds = new Set(give.map(p => p.id)), getIds = new Set(get.map(p => p.id));
   let after = [...roster.filter(p => !giveIds.has(p.id)), ...get.map(p => ({ ...p, slot: 12 }))];
-  const drops = [];
+  const drops = [], adds = [];
   const worth = p => (p.outForSeason ? -1 : value(p, basis));
   while (after.length > roster.length) {
     const pool = after.filter(p => !getIds.has(p.id));
@@ -313,20 +403,53 @@ export function applyTrade(roster, give, get, basis) {
     drops.push(d);
     after = after.filter(p => p !== d);
   }
-  return { after, drops };
+  if (fill && after.length < roster.length) {
+    const owned = new Set(after.map(p => p.id));
+    const pool = (fill.fas || []).filter(p => !owned.has(p.id) && !giveIds.has(p.id) && !p.outForSeason && (!isOut(p) || p.returnSP))
+      .sort((a, b) => value(b, basis) - value(a, basis)).slice(0, fill.S ? 6 : after.length < roster.length ? roster.length - after.length : 0);
+    while (after.length < roster.length && pool.length) {
+      let best = pool[0];
+      if (fill.S && pool.length > 1) {
+        let top = -Infinity;
+        for (const fa of pool) { const sc = fill.S([...after, { ...fa, slot: 12 }]); if (sc > top) { top = sc; best = fa; } }
+      }
+      pool.splice(pool.indexOf(best), 1);
+      after = [...after, { ...best, slot: 12 }];
+      adds.push(best);
+    }
+  }
+  return { after, drops, adds };
+}
+const faPool = m => m.poolFAs || m.freeAgents || [];
+
+// What the free agents a trade lets a team pick up would be worth on their own (added by
+// dropping its least useful players instead of trading). Taken out of a trade's value,
+// so a 2-for-1 isn't credited for a waiver move the team could make anyway.
+export function faAlone(roster, adds, basis, S) {
+  if (!adds?.length) return 0;
+  return Math.max(0, S(applyTrade(roster, [], adds, basis).after) - S(roster));
 }
 
 // Projected points for a team before/after a trade, in each window.
 export function tradeImpact(m, team, give, get, basis) {
   const before = team.roster;
-  const { after, drops } = applyTrade(before, give, get, basis);
+  // Pick any free-agent fill-in on every remaining day, exactly like the trade ideas do.
+  const days = futureDays(m);
+  const { after, drops, adds } = applyTrade(before, give, get, basis, { fas: faPool(m), S: r => projectDays(m, r, days, basis).total });
   const w = seasonWindows(m);
   const calc = r => ({
     week: projectDays(m, r, w.week, basis).total,
     ros: projectDays(m, r, w.ros, basis).total,
     po: projectDays(m, r, w.po, basis).total,
   });
-  return { before: calc(before), after: calc(after), drops };
+  const b = calc(before);
+  // Value of the free-agent pickup on its own, per window (not credited to the trade).
+  let fa = { week: 0, ros: 0, po: 0 };
+  if (adds.length) {
+    const alone = calc(applyTrade(before, [], adds, basis).after);
+    fa = { week: Math.max(0, alone.week - b.week), ros: Math.max(0, alone.ros - b.ros), po: Math.max(0, alone.po - b.po) };
+  }
+  return { before: b, after: calc(after), drops, adds, fa };
 }
 
 // League-wide form: rostered players on other teams playing below their norm (buy low),
@@ -500,6 +623,21 @@ export function analyze(m, basis = 'smart') {
   if (hot.length) note('good', 'Form', 'Heating up', hot.slice(0, 4).join(', ') + ' (last 15 vs season).');
   if (cold.length) note('warn', 'Form', 'Cooling off', cold.slice(0, 4).join(', ') + '. Check minutes before benching.');
 
+  // Usage shifts on your roster over the next week (teammates out or returning).
+  if (adjustments.usage) {
+    const next = Array.from({ length: 7 }, (_, i) => m.currentSP + i);
+    const shifts = my.roster.map(p => {
+      const sp = next.find(d => gameLeft(m, p, d) && availableOn(m, p, d));
+      return sp ? { p, ...usageReasons(m, p, sp, basis) } : null;
+    }).filter(x => x && Math.abs(x.factor - 1) >= 0.06).sort((a, b) => Math.abs(b.factor - 1) - Math.abs(a.factor - 1));
+    const up = shifts.filter(x => x.factor > 1), down = shifts.filter(x => x.factor < 1);
+    const why = x => (x.factor > 1 ? x.out : x.back).slice(0, 2).map(q => q.name.split(' ').slice(-1)[0]).join(' & ');
+    if (up.length) note('good', 'Usage', 'Usage bump from teammate injuries',
+      up.slice(0, 3).map(x => `${x.p.name} +${Math.round((x.factor - 1) * 100)}%${why(x) ? ` (${why(x)} out)` : ''}`).join(', ') + '. Already in your projections.');
+    if (down.length) note('warn', 'Usage', 'Usage dip: teammates returning',
+      down.slice(0, 3).map(x => `${x.p.name} ${Math.round((x.factor - 1) * 100)}%${why(x) ? ` (${why(x)} back)` : ''}`).join(', ') + '.');
+  }
+
   const plan = streamPlan(m, my, basis, addsLeft(m, my));
   if (plan.length) {
     const total = plan.reduce((a, x) => a + x.gain, 0);
@@ -577,24 +715,27 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
   const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 11);
   const mine = pieces(my), theirs = pieces(other);
   const sum = ps => ps.reduce((a, p) => a + v(p), 0);
-  // "On paper" value with a star premium: managers rate one 45 FP/G player above a
-  // 30 + 25 pair because lineup spots are limited, so 2-for-1s are judged that way.
-  const paper = ps => ps.reduce((a, p) => a + Math.max(0, v(p)) ** 1.5, 0);
+  // "On paper" value: in uneven deals the side that ends up a player short is credited
+  // with the best free agent it can add, plus a mild star premium (one 45 FP/G player
+  // still edges a 30 + 15 because lineup spots are limited).
+  const paper = ps => ps.reduce((a, p) => a + Math.max(0, v(p)) ** 1.2, 0);
+  const fill = { fas: faPool(m) };
   const out = [];
   const consider = (give, get) => {
-    const a = applyTrade(my.roster, give, get, basis);
+    const a = applyTrade(my.roster, give, get, basis, fill);
     // Screening on sampled days is loose on purpose; refineIdeas re-checks exactly.
-    const myGain = ctx.S(a.after) - myBase;
+    const myGain = ctx.S(a.after) - myBase - faAlone(my.roster, a.adds, basis, ctx.S);
     if (myGain < 0) return;
-    const z = applyTrade(other.roster, get, give, basis);
-    const theirGain = ctx.S(z.after) - theirBase;
-    const giveV = sum(give), getV = sum(get), paperGive = paper(give), paperGet = paper(get);
+    const z = applyTrade(other.roster, get, give, basis, fill);
+    const theirGain = ctx.S(z.after) - theirBase - faAlone(other.roster, z.adds, basis, ctx.S);
+    const giveV = sum(give), getV = sum(get);
+    const paperGive = paper([...give, ...z.adds]), paperGet = paper([...get, ...a.adds]);
     // Same acceptance rule as the exact pass, with slack for sampling noise.
     const slack = 60 + 0.15 * Math.abs(myGain);
     const rated = rateIdea(myGain + slack, theirGain + slack, paperGive * 1.03, paperGet);
     if (!rated) return;
     out.push({ partner: other, give, get, type: `${give.length}for${get.length}`, myGain, theirGain, giveV, getV, paperGive, paperGet,
-      drops: a.drops, theirDrops: z.drops, score: rated.score });
+      drops: a.drops, theirDrops: z.drops, adds: a.adds, theirAdds: z.adds, score: rated.score });
   };
   if (types.includes('1for1')) for (const a of mine) for (const b of theirs) {
     const r = v(b) / Math.max(1, v(a));
@@ -644,8 +785,8 @@ export function keepBest(ideas, n = 12) {
 
 // Would they plausibly say yes?
 //  win-win: it helps them too.
-//  fair:    they get at least ~as much value on paper (with a star premium) and lose
-//           little in fit.
+//  fair:    they get at least ~as much value on paper (counting the free agent the
+//           short-handed side picks up, with a mild star premium) and lose little in fit.
 //  ask:     close in value on paper but costs them more; still worth proposing.
 // Ranked by your gain, nudged up when it helps them (easier yes) and down when it
 // costs them (harder sell).
@@ -666,12 +807,16 @@ export function makeRefiner(m, my, basis) {
   const S = roster => projectDays(m, roster, days, basis).total;
   const base = new Map();
   const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster)); return base.get(t.id); };
+  const fill = { fas: faPool(m), S };
+  const paper = ps => ps.reduce((a, p) => a + Math.max(0, value(p, basis)) ** 1.2, 0);
   return x => {
-    const a = applyTrade(my.roster, x.give, x.get, basis);
-    const z = applyTrade(x.partner.roster, x.get, x.give, basis);
-    const myGain = S(a.after) - baseOf(my), theirGain = S(z.after) - baseOf(x.partner);
-    const rated = rateIdea(myGain, theirGain, x.paperGive, x.paperGet);
-    return rated ? { ...x, myGain, theirGain, drops: a.drops, theirDrops: z.drops, ...rated } : null;
+    const a = applyTrade(my.roster, x.give, x.get, basis, fill);
+    const z = applyTrade(x.partner.roster, x.get, x.give, basis, fill);
+    const myGain = S(a.after) - baseOf(my) - faAlone(my.roster, a.adds, basis, S);
+    const theirGain = S(z.after) - baseOf(x.partner) - faAlone(x.partner.roster, z.adds, basis, S);
+    const paperGive = paper([...x.give, ...z.adds]), paperGet = paper([...x.get, ...a.adds]);
+    const rated = rateIdea(myGain, theirGain, paperGive, paperGet);
+    return rated ? { ...x, myGain, theirGain, paperGive, paperGet, drops: a.drops, theirDrops: z.drops, adds: a.adds, theirAdds: z.adds, ...rated } : null;
   };
 }
 export function refineIdeas(m, my, ideas, basis, top = 80) {
@@ -681,8 +826,11 @@ export function refineIdeas(m, my, ideas, basis, top = 80) {
 
 // Why a trade helps: which lineup slots get stronger and how many more starts you get.
 export function tradeReason(m, my, idea, basis, ctx) {
-  const before = projectDays(m, my.roster, ctx.days, basis, true);
-  const after = projectDays(m, applyTrade(my.roster, idea.give, idea.get, basis).after, ctx.days, basis, true);
+  // Compare against the roster that already made the free-agent pickup on its own, so the
+  // reason reflects the trade itself.
+  const start = idea.adds?.length ? applyTrade(my.roster, [], idea.adds, basis).after : my.roster;
+  const before = projectDays(m, start, ctx.days, basis, true);
+  const after = projectDays(m, applyTrade(my.roster, idea.give, [...idea.get, ...(idea.adds || [])], basis).after, ctx.days, basis, true);
   const n = Math.max(1, ctx.days.length);
   const deltas = Object.keys({ ...before.slotPts, ...after.slotPts }).map(Number)
     .map(id => ({ id, d: ((after.slotPts[id] || 0) - (before.slotPts[id] || 0)) / n }))

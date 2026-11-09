@@ -32,6 +32,8 @@ Every number uses your league's own scoring (points per stat), lineup size, matc
 - Tap ✕ on a free agent to hide them from waivers, pickups, streaming plans and stash lists. Bring them back from "Hidden players" under the waiver wire.
 
 ## Notes
+- Projections adjust for outside factors (toggle in Settings): when a regular is out, teammates absorb part of their production (about +10–13% for one star out, capped at ±30%), and lose it when a starter returns from a long absence; stars get −5% on the second night of back-to-backs.
+- Uneven trades (2-for-1, 1-for-2): the team left a player short picks up the best free agent for its lineup. That pickup counts toward fairness on paper, but its standalone value isn't credited to the trade, since the team could add that player anyway.
 - Shortcuts: 1–9 switch tabs, ← → step through weeks, R refreshes, Esc closes the player panel. The app reopens on the last tab you used.
 - Trade ideas are screened on sampled days, then the best are re-checked on every remaining day, so their numbers match the analyzer exactly.
 - Injuries: players count from ESPN's expected return date. Out-for-season players never return; players out with no return date are not counted until ESPN posts one; day-to-day players are discounted 20% for the current matchup only.

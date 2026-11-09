@@ -466,3 +466,11 @@ tr.me .pbar span { color: var(--ink); }
 .kind.ask { border: 1px dashed var(--warn); color: var(--warn); }
 .morebtn { display: block; margin: 12px auto 4px; }
 .morebtn small { opacity: .6; margin-left: 4px; }
+
+/* ---------- usage + projection settings */
+.usage { font-size: 12px; line-height: 1.45; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); color: var(--muted); }
+.usage b { color: var(--text); margin-right: 4px; }
+.usage.up b { color: var(--good); }
+.usage.down b { color: var(--warn); }
+.toggle { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; line-height: 1.45; }
+.toggle input { width: auto; margin-top: 3px; accent-color: var(--volt); }

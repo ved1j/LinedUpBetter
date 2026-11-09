@@ -43,7 +43,7 @@ export function makeDemo() {
     usedNames.add(name);
     const pos = pick(POS);
     const inj = r();
-    const gp = int(9, 13);
+    const gp = 0; // set below from the team's real games played
     const l15 = base * rand(0.78, 1.25);
     return {
       id: pid++, name, proTeamId: int(1, 30), pos, eligible: ELIG[pos], slots: [...new Set(ELIG[pos].flatMap(x => POS_SLOTS[x]))],
@@ -59,6 +59,13 @@ export function makeDemo() {
       },
       ...extra,
     };
+  };
+  // Games played consistent with the schedule: regulars play ~85–100% of team games.
+  const teamPlayed = id => Object.keys(proTeams[id].games).filter(sp => +sp < currentSP).length;
+  const setGp = p => {
+    const g = Math.round(teamPlayed(p.proTeamId) * rand(0.85, 1));
+    for (const k of ['season', 'l30']) p.stats[k].gp = g;
+    p.stats.l15.gp = Math.min(g, int(5, 8));
   };
   const TYPES = ['Ankle', 'Knee', 'Hamstring', 'Back', 'Calf', 'Wrist'];
   // Injured players get ESPN-style return info: most have an expected date.
@@ -83,6 +90,7 @@ export function makeDemo() {
     teams[round % 2 ? 9 - k : k].roster.push(player(v, { owned: +rand(55, 100).toFixed(1), ownedChange: +rand(-2, 2).toFixed(1) }));
   });
   const SLOTS = [0, 1, 2, 3, 4, 5, 6, 11, 11, 11, 12, 12, 12, 13];
+  for (const t of teams) t.roster.forEach(setGp);
   for (const t of teams) {
     t.roster.sort(() => r() - 0.5);
     t.roster.forEach((p, i) => { p.slot = SLOTS[i]; });
@@ -93,6 +101,7 @@ export function makeDemo() {
   const freeAgents = Array.from({ length: 160 }, () => player(6 + 22 * r() ** 1.4, {
     owned: +rand(0, 45).toFixed(1), ownedChange: +rand(-4, 9).toFixed(1), status: r() < 0.15 ? 'WAIVERS' : 'FREEAGENT',
   }));
+  freeAgents.forEach(setGp);
   for (const p of freeAgents) if (p.injury === 'OUT') injure(p);
 
   // Round-robin schedule (circle method).

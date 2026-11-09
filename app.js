@@ -73,7 +73,7 @@ function toast(text) {
 // Memoize expensive season-long calculations until the data, projection basis or
 // viewed team changes.
 function memo(name, fn) {
-  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${Object.keys(state.pnotes).length}`;
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${Object.keys(state.pnotes).length}`;
   const hit = state.calc[name];
   if (hit?.key === key) return hit.v;
   const v = fn();
@@ -252,12 +252,15 @@ async function load(force = false) {
   state.loading = false;
   render();
 }
+const adjustOn = () => state.settings.adjust !== false;
 function reanalyze() {
   const m = state.model;
   if (!m) { state.an = null; return; }
   m.myTeamId = state.viewId;
-  // Players you've X'd out never show up in waiver suggestions, streaming plans or stash lists.
-  state.an = A.analyze({ ...m, freeAgents: m.freeAgents.filter(p => !isHidden(p.id)) }, state.settings.basis);
+  A.setAdjustments({ usage: adjustOn(), rest: adjustOn() });
+  // Players you've X'd out never show up in waiver suggestions, streaming plans or stash
+  // lists (but still count as teammates for usage and as trade fill-ins).
+  state.an = A.analyze({ ...m, freeAgents: m.freeAgents.filter(p => !isHidden(p.id)), poolFAs: m.freeAgents }, state.settings.basis);
   state.index = new Map();
   for (const t of m.teams) for (const p of t.roster) state.index.set(p.id, { p, ownerId: t.id });
   for (const p of m.freeAgents) if (!state.index.has(p.id)) state.index.set(p.id, { p, ownerId: null });
@@ -689,13 +692,13 @@ function vPower(st) {
 }
 
 function getOdds() {
-  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}`;
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${adjustOn()}`;
   if (state.oddsCache?.key !== key) state.oddsCache = { key, odds: A.playoffOdds(state.model, state.settings.basis) };
   return state.oddsCache.odds;
 }
 
 // ---- Trade tab
-const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}`;
+const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}`;
 const tick = () => new Promise(r => setTimeout(r, 0));
 
 // Scans every other team for trade ideas, one team per tick so the popup stays responsive.
@@ -795,6 +798,8 @@ function vTradeIdeas() {
     const why = [];
     if (r?.best) why.push(`${mine.weak.includes(r.best.id) ? 'Fixes your weak' : 'Stronger at'} ${label(r.best.id)} (${signed(r.best.d, 1)} pts/day)`);
     if (r && Math.abs(r.starts) >= 2) why.push(`${signed(r.starts)} games started`);
+    if (x.adds?.length) why.push(`you add FA ${x.adds.map(p => esc(p.name)).join(', ')}`);
+    if (x.theirAdds?.length) why.push(`they add FA ${x.theirAdds.map(p => esc(p.name)).join(', ')}`);
     if (x.drops.length) why.push(`you drop ${x.drops.map(p => esc(p.name)).join(', ')}`);
     if (x.theirDrops.length) why.push(`they drop ${x.theirDrops.map(p => esc(p.name)).join(', ')}`);
     return `<div class="idea">
@@ -865,10 +870,15 @@ function vTrade() {
     const a = A.tradeImpact(m, an.my, give, get, b);
     const z = partner ? A.tradeImpact(m, partner, get, give, b) : null;
     const d = (x, y) => { const v = y - x; return `<span class="${v > 0.5 ? 'up' : v < -0.5 ? 'down' : 'muted'}">${signed(v)}</span>`; };
-    const row = (label, k) => `<tr><td>${label}</td><td class="num">${d(a.before[k], a.after[k])}</td>${z ? `<td class="num">${d(z.before[k], z.after[k])}</td>` : ''}</tr>`;
-    const verdict = (a.after.ros - a.before.ros) + (a.after.po - a.before.po);
-    const theirs2 = z ? (z.after.ros - z.before.ros) + (z.after.po - z.before.po) : 0;
-    const drops = [...a.drops.map(p => `${esc(an.my.name)} drops ${esc(p.name)}`), ...(z ? z.drops.map(p => `${esc(partner.name)} drops ${esc(p.name)}`) : [])];
+    // Trade value excludes any free agent a team picks up (it could add them anyway).
+    const net = (r, k) => r.after[k] - r.before[k] - r.fa[k];
+    const row = (label, k) => `<tr><td>${label}</td><td class="num">${d(0, net(a, k))}</td>${z ? `<td class="num">${d(0, net(z, k))}</td>` : ''}</tr>`;
+    const verdict = net(a, 'ros') + net(a, 'po');
+    const theirs2 = z ? net(z, 'ros') + net(z, 'po') : 0;
+    const faNote = [...(a.adds.length ? [`${esc(an.my.name)}'s pickup of ${a.adds.map(p => esc(p.name)).join(', ')} is worth ${signed(a.fa.ros + a.fa.po)} on its own`] : []),
+      ...(z && z.adds.length ? [`${esc(partner.name)}'s pickup of ${z.adds.map(p => esc(p.name)).join(', ')} is worth ${signed(z.fa.ros + z.fa.po)} on its own`] : [])];
+    const drops = [...a.drops.map(p => `${esc(an.my.name)} drops ${esc(p.name)}`), ...(z ? z.drops.map(p => `${esc(partner.name)} drops ${esc(p.name)}`) : []),
+      ...a.adds.map(p => `${esc(an.my.name)} picks up free agent ${esc(p.name)}`), ...(z ? z.adds.map(p => `${esc(partner.name)} picks up free agent ${esc(p.name)}`) : [])];
     const vGive = give.reduce((s2, p) => s2 + val(p), 0), vGet = get.reduce((s2, p) => s2 + val(p), 0);
     result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
         ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${row('Fantasy playoffs', 'po')}
@@ -876,7 +886,8 @@ function vTrade() {
       </tbody></table>
       <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${signed(verdict)} projected points the rest of the way (season + playoffs).
         ${z ? `<span class="muted">${esc(partner.name)}: ${signed(theirs2)}${verdict > 0 && theirs2 > 0 ? ' — good for both, easy sell.' : verdict > 0 && vGive >= vGet * 0.97 ? ' — looks fair to them on paper.' : ''}</span>` : ''}</p>
-      ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}.</p>` : ''}`;
+      ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}. A team left a player short fills the spot with the best free agent for its lineup.</p>` : ''}
+      ${faNote.length ? `<p class="muted small">${faNote.join('; ')}. That part isn't counted above, since it doesn't need the trade.</p>` : ''}`;
   }
   const bs = A.buySell(m, an.my.id, b);
   const bsRow = (x, act) => `<div class="pick">${pCell(x.p)}<div class="meta">${f1(x.p.stats.l15.avg)}<small> L15</small><br>${f1(x.p.stats.season.avg)}<small> season</small></div>
@@ -1028,6 +1039,22 @@ function vWatchlist() {
   </section>`;
 }
 
+// Usage outlook for the player's next game, and when it changes over the next two weeks.
+function vUsage(p) {
+  const m = state.model, b = state.settings.basis;
+  if (!adjustOn() || A.isOut(p)) return '';
+  const days = Array.from({ length: 14 }, (_, i) => m.currentSP + i).filter(sp => A.gameLeft(m, p, sp));
+  if (!days.length) return '';
+  const r = A.usageReasons(m, p, days[0], b);
+  const pct = f => `${f > 1 ? '+' : '−'}${Math.abs(Math.round((f - 1) * 100))}%`;
+  const names = ps => ps.slice(0, 3).map(q => `${esc(q.name)}${q.returnDate ? ` <span class="muted">(back ${A.fmtMD(new Date(q.returnDate + 'T12:00:00'))})</span>` : ''}`).join(', ');
+  const later = days.map(sp => ({ sp, f: A.usageFactor(m, p, sp, b) })).find(x => Math.abs(x.f - r.factor) >= 0.04);
+  const changes = later ? ` From ${A.fmtDow(A.spDate(m, later.sp))} ${A.fmtMD(A.spDate(m, later.sp))}: ${Math.abs(later.f - 1) < 0.02 ? 'back to normal' : pct(later.f)}.` : '';
+  if (Math.abs(r.factor - 1) < 0.02) return later ? `<div class="usage"><b>Usage</b> normal now.${changes}</div>` : '';
+  return `<div class="usage ${r.factor > 1 ? 'up' : 'down'}"><b>Usage ${pct(r.factor)}</b> next game
+    ${r.factor > 1 && r.out.length ? `with ${names(r.out)} out` : r.factor < 1 && r.back.length ? `with ${names(r.back)} back` : ''}.${changes}</div>`;
+}
+
 // How much a player is worth to the viewed team's lineup over the rest of the season.
 function vWorth(p, ownerId) {
   const my = state.an.my;
@@ -1065,6 +1092,7 @@ function vDrawer() {
       ${ownerId != null && ownerId !== state.an.my.id ? `<button class="btn" data-act="target" data-id="${p.id}" data-owner="${ownerId}">⇄ Trade for</button>` : ''}
     </div>
     ${vWorth(p, ownerId)}
+    ${vUsage(p)}
     <div class="facts">
       <div><span class="k">Avg</span><span class="v">${f1(avgOf(p))}</span></div><div><span class="k">Proj/G</span><span class="v">${f1(val(p))}</span></div>
       <div><span class="k">Games left</span><span class="v">${A.gamesIn(m, p, state.an.rem)}</span></div>
@@ -1100,6 +1128,10 @@ function vSettings() {
         <span class="small">${signed}</span>
       </div>
     </div></section>
+    <section class="card"><h3>Projections</h3>
+      <label class="toggle"><input type="checkbox" data-act="adjust" ${adjustOn() ? 'checked' : ''}>
+        <span><b>Adjust for teammate injuries and back-to-back rest</b><br><span class="muted small">When a regular is out, teammates absorb part of their production (and lose it when a starter returns from a long absence). Stars get −5% on the second night of back-to-backs. Turn off for raw averages × games.</span></span></label>
+    </section>
     <details class="card adv"><summary><h3>Advanced: manual ESPN login <span class="r">only if your league still won't load</span></h3></summary>
       <div class="form">
         <label>espn_s2<input id="f-s2" type="password" autocomplete="off" spellcheck="false" placeholder="long value starting with AE…" value="${esc(s.espnS2 || '')}"></label>
@@ -1272,6 +1304,7 @@ document.addEventListener('change', async e => {
   }
   if (act === 'basis') { state.settings.basis = e.target.value; await saveSettings(); reanalyze(); render(); }
   if (act === 'inj') { state.wv.showInjured = e.target.checked; state.keepScroll = true; render(); }
+  if (act === 'adjust') { state.settings.adjust = e.target.checked; await saveSettings(); reanalyze(); render(); toast(e.target.checked ? 'Teammate usage + rest adjustments on' : 'Adjustments off: raw averages'); }
 });
 
 // ---------- boot
