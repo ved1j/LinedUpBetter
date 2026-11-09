@@ -33,6 +33,7 @@ Every number uses your league's own scoring (points per stat), lineup size, matc
 
 ## Notes
 - Projections adjust for outside factors (toggle in Settings): when a regular is out, teammates absorb part of their production (about +10–13% for one star out, capped at ±30%), and lose it when a starter returns from a long absence; stars get −5% on the second night of back-to-backs.
+- Trade value ("name value"): what other managers think a player is worth = reputation (draft position turned into FP/G, last season, ESPN projection) blended with this season's form, which gains weight as games are played (up to 70%). Trade ideas must be close on trade value, so a hot start doesn't make a mid-round pick look like a star; the analyzer rates acceptance as likely / possible / unlikely.
 - Uneven trades (2-for-1, 1-for-2): the team left a player short picks up the best free agent for its lineup. That pickup counts toward fairness on paper, but its standalone value isn't credited to the trade, since the team could add that player anyway.
 - Shortcuts: 1–9 switch tabs, ← → step through weeks, R refreshes, Esc closes the player panel. The app reopens on the last tab you used.
 - Trade ideas are screened on sampled days, then the best are re-checked on every remaining day, so their numbers match the analyzer exactly.

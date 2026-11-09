@@ -377,6 +377,49 @@ export function playoffOdds(m, basis, sims = 3000) {
   return { teams: res, byes, simulated: games.length };
 }
 
+// ---- Trade value ("name value")
+// What other managers think a player is worth, on the same FP/G scale as everything
+// else. Reputation = draft position (turned into the FP/G a pick at that spot is worth
+// in this league), last season and ESPN's projection; current form = this season's
+// production. Early on reputation dominates; current form takes over gradually (up to
+// 70% by ~35 games), so a hot start doesn't make a mid-round pick look like a star.
+const marketMemo = new WeakMap();
+function marketCtx(m, basis) {
+  let byBasis = marketMemo.get(m);
+  if (!byBasis) marketMemo.set(m, byBasis = new Map());
+  let c = byBasis.get(basis);
+  if (c) return c;
+  const pool = new Map();
+  for (const t of m.teams) for (const p of t.roster) pool.set(p.id, p);
+  for (const p of m.poolFAs || m.freeAgents || []) if (!pool.has(p.id)) pool.set(p.id, p);
+  // League-wide value ladder (best first) to translate a draft slot into FP/G.
+  const ladder = [...pool.values()].map(p => p.stats?.proj?.avg ?? p.stats?.prev?.avg ?? value(p, basis))
+    .filter(Number.isFinite).sort((a, b) => b - a);
+  byBasis.set(basis, c = { ladder, cache: new Map() });
+  return c;
+}
+export function marketParts(m, p, basis) {
+  const c = marketCtx(m, basis);
+  const hit = c.cache.get(p.id);
+  if (hit) return hit;
+  const s = p.stats || {};
+  const slot = p.adp || p.espnRank;
+  const draft = slot && c.ladder.length ? c.ladder[Math.min(c.ladder.length - 1, Math.max(0, Math.round(slot) - 1))] : null;
+  const prev = s.prev?.gp >= 20 && Number.isFinite(s.prev.avg) ? s.prev.avg : null;
+  const proj = Number.isFinite(s.proj?.avg) ? s.proj.avg : null;
+  const parts = [[draft, 0.4], [prev, 0.3], [proj, 0.3]].filter(([x]) => x != null);
+  const w = parts.reduce((a, [, k]) => a + k, 0);
+  const rep = w ? parts.reduce((a, [x, k]) => a + x * k, 0) / w : null;
+  const current = value(p, 'smart');
+  const gp = s.season?.gp || 0;
+  const wc = rep == null ? 1 : Math.min(0.7, 0.15 + gp / 60);
+  const v = rep == null ? current : (1 - wc) * rep + wc * current;
+  const out = { value: v, rep, current, draft, prev, proj, wc, adp: p.adp, auction: p.auction, espnRank: p.espnRank };
+  c.cache.set(p.id, out);
+  return out;
+}
+export const marketValue = (m, p, basis) => marketParts(m, p, basis).value;
+
 // ---- Trades
 export function seasonWindows(m) {
   const week = remainingSps(m);
@@ -715,10 +758,10 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
   const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 11);
   const mine = pieces(my), theirs = pieces(other);
   const sum = ps => ps.reduce((a, p) => a + v(p), 0);
-  // "On paper" value: in uneven deals the side that ends up a player short is credited
-  // with the best free agent it can add, plus a mild star premium (one 45 FP/G player
-  // still edges a 30 + 15 because lineup spots are limited).
-  const paper = ps => ps.reduce((a, p) => a + Math.max(0, v(p)) ** 1.2, 0);
+  // "On paper" = trade value (name + form, see marketParts). In uneven deals the side
+  // that ends up a player short is credited with the best free agent it can add, plus a
+  // mild star premium (one 45 FP/G player still edges a 30 + 15: lineup spots are limited).
+  const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
   const fill = { fas: faPool(m) };
   const out = [];
   const consider = (give, get) => {
@@ -734,7 +777,10 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
     const slack = 60 + 0.15 * Math.abs(myGain);
     const rated = rateIdea(myGain + slack, theirGain + slack, paperGive * 1.03, paperGet);
     if (!rated) return;
+    const mkt = ps => ps.reduce((a2, p) => a2 + marketValue(m, p, basis), 0);
+    // Trade value each side receives, counting any free-agent fill-in.
     out.push({ partner: other, give, get, type: `${give.length}for${get.length}`, myGain, theirGain, giveV, getV, paperGive, paperGet,
+      mktGive: mkt([...give, ...z.adds]), mktGet: mkt([...get, ...a.adds]),
       drops: a.drops, theirDrops: z.drops, adds: a.adds, theirAdds: z.adds, score: rated.score });
   };
   if (types.includes('1for1')) for (const a of mine) for (const b of theirs) {
@@ -783,17 +829,18 @@ export function keepBest(ideas, n = 12) {
   return kept;
 }
 
-// Would they plausibly say yes?
-//  win-win: it helps them too.
-//  fair:    they get at least ~as much value on paper (counting the free agent the
-//           short-handed side picks up, with a mild star premium) and lose little in fit.
-//  ask:     close in value on paper but costs them more; still worth proposing.
+// Would they plausibly say yes? "On paper" is trade value (name + form, counting the
+// free agent a short-handed side picks up, with a mild star premium). Nobody accepts a
+// deal that looks lopsided on names, even if it would help their lineup, so:
+//  win-win: it helps them too, and they get at least ~90% of the trade value back.
+//  fair:    they get at least ~as much trade value and lose little in fit.
+//  ask:     close in trade value but costs them more; still worth proposing.
 // Ranked by your gain, nudged up when it helps them (easier yes) and down when it
 // costs them (harder sell).
 export const IDEA_KINDS = { 'win-win': 'Win-win', fair: 'Fair on paper', ask: 'Worth asking' };
 function rateIdea(myGain, theirGain, giveV, getV) {
   if (myGain < 8) return null;
-  if (theirGain >= 0) return { kind: 'win-win', score: myGain + 0.6 * Math.min(theirGain, myGain) };
+  if (theirGain >= 0 && giveV >= getV * 0.9) return { kind: 'win-win', score: myGain + 0.6 * Math.min(theirGain, myGain) };
   if (giveV >= getV * 0.95 && theirGain >= -0.6 * myGain) return { kind: 'fair', score: myGain + 1.2 * theirGain };
   if (giveV >= getV * 0.88 && theirGain >= -1.0 * myGain) return { kind: 'ask', score: myGain + 1.5 * theirGain };
   return null;
@@ -808,15 +855,16 @@ export function makeRefiner(m, my, basis) {
   const base = new Map();
   const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster)); return base.get(t.id); };
   const fill = { fas: faPool(m), S };
-  const paper = ps => ps.reduce((a, p) => a + Math.max(0, value(p, basis)) ** 1.2, 0);
+  const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
   return x => {
     const a = applyTrade(my.roster, x.give, x.get, basis, fill);
     const z = applyTrade(x.partner.roster, x.get, x.give, basis, fill);
     const myGain = S(a.after) - baseOf(my) - faAlone(my.roster, a.adds, basis, S);
     const theirGain = S(z.after) - baseOf(x.partner) - faAlone(x.partner.roster, z.adds, basis, S);
     const paperGive = paper([...x.give, ...z.adds]), paperGet = paper([...x.get, ...a.adds]);
+    const mkt = ps => ps.reduce((t, p) => t + marketValue(m, p, basis), 0);
     const rated = rateIdea(myGain, theirGain, paperGive, paperGet);
-    return rated ? { ...x, myGain, theirGain, paperGive, paperGet, drops: a.drops, theirDrops: z.drops, adds: a.adds, theirAdds: z.adds, ...rated } : null;
+    return rated ? { ...x, myGain, theirGain, paperGive, paperGet, mktGive: mkt([...x.give, ...z.adds]), mktGet: mkt([...x.get, ...a.adds]), drops: a.drops, theirDrops: z.drops, adds: a.adds, theirAdds: z.adds, ...rated } : null;
   };
 }
 export function refineIdeas(m, my, ideas, basis, top = 80) {

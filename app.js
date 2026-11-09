@@ -189,7 +189,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:v6:${s.leagueId}:${s.season}`; // bump when the parser changes
+      const key = `cache:v7:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {
@@ -812,7 +812,7 @@ function vTradeIdeas() {
         <span class="g-them ${x.theirGain >= 0 ? 'up' : 'down'}" title="Their projected points, rest of season + playoffs">${signed(x.theirGain)} them</span>
       </div>
       <div class="idea-swap"><div><div class="rk-label">You give</div>${side(x.give)}</div><div class="arrowx">⇄</div><div><div class="rk-label">You get</div>${side(x.get)}</div></div>
-      <div class="idea-foot"><span class="muted small">${why.join(' · ') || 'Better lineup fit for your roster.'} · Proj/G ${f1(x.giveV)} for ${f1(x.getV)}</span>
+      <div class="idea-foot"><span class="muted small">${why.join(' · ') || 'Better lineup fit for your roster.'} · <span title="Trade value = name + form: draft position, last season, ESPN projection and this season. Includes free-agent fill-ins.">trade value ${f1(x.mktGive)} for ${f1(x.mktGet)}${x.adds?.length || x.theirAdds?.length ? ' incl. FA' : ''}</span></span>
         <button class="btn mini" data-act="idea" data-i="${sc.ideas.indexOf(x)}">Open in analyzer</button></div>
     </div>`;
   }).join('');
@@ -846,7 +846,7 @@ function vNeeds() {
 function vTargets() {
   const sc = state.scan;
   if (!sc || sc.status !== 'done') return `<section class="card"><h3>Targets</h3><p class="muted small">Waiting for the league scan…</p></section>`;
-  const rows = sc.targets.map(x => `<div class="pick">${pCell(x.p)}<div class="meta"><button class="tlink small" data-view="${x.owner.id}">${esc(x.owner.name)}</button><br>${f1(val(x.p))}<small> proj/G</small></div>
+  const rows = sc.targets.map(x => `<div class="pick">${pCell(x.p)}<div class="meta"><button class="tlink small" data-view="${x.owner.id}">${esc(x.owner.name)}</button><br>${f1(val(x.p))}<small> proj/G</small> · ${f1(A.marketValue(state.model, x.p, state.settings.basis))}<small> trade value</small></div>
     <div class="gain">${signed(x.gain)}</div><button class="btn mini" data-act="target" data-id="${x.p.id}" data-owner="${x.owner.id}">Target</button></div>`).join('');
   return `<section class="card"><h3>Targets <span class="r muted small">who'd add the most to your lineup, before what you give up</span></h3>${rows || '<p class="muted">Nobody on another roster beats your current lineup.</p>'}</section>`;
 }
@@ -880,10 +880,17 @@ function vTrade() {
     const drops = [...a.drops.map(p => `${esc(an.my.name)} drops ${esc(p.name)}`), ...(z ? z.drops.map(p => `${esc(partner.name)} drops ${esc(p.name)}`) : []),
       ...a.adds.map(p => `${esc(an.my.name)} picks up free agent ${esc(p.name)}`), ...(z ? z.adds.map(p => `${esc(partner.name)} picks up free agent ${esc(p.name)}`) : [])];
     const vGive = give.reduce((s2, p) => s2 + val(p), 0), vGet = get.reduce((s2, p) => s2 + val(p), 0);
+    const mv = p => A.marketValue(m, p, b);
+    const mGive = give.reduce((s2, p) => s2 + mv(p), 0) + (z ? z.adds.reduce((s2, p) => s2 + mv(p), 0) : 0);
+    const mGet = get.reduce((s2, p) => s2 + mv(p), 0) + a.adds.reduce((s2, p) => s2 + mv(p), 0);
+    const ratio = mGet ? mGive / mGet : 1;
+    const odds = ratio >= 0.97 ? ['likely', 'up', 'they get as much name value as they give'] : ratio >= 0.88 ? ['possible', 'muted', 'close on name value, expect a counter'] : ['unlikely', 'down', 'they give up a bigger name than they get'];
     result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
         ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${row('Fantasy playoffs', 'po')}
         <tr class="sum"><td>Proj/G swapped</td><td class="num">${d(vGive, vGet)}</td>${z ? `<td class="num">${d(vGet, vGive)}</td>` : ''}</tr>
+        <tr class="sum"><td title="Name + form: draft position, last season, ESPN projection and this season (free-agent fill-ins included)">Trade value swapped</td><td class="num">${d(mGive, mGet)}</td>${z ? `<td class="num">${d(mGet, mGive)}</td>` : ''}</tr>
       </tbody></table>
+      ${z ? `<p class="small" style="margin:10px 0 0">Acceptance: <b class="${odds[1]}">${odds[0]}</b> <span class="muted">— ${odds[2]} (trade value ${f1(mGive)} for ${f1(mGet)}).</span></p>` : ''}
       <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${signed(verdict)} projected points the rest of the way (season + playoffs).
         ${z ? `<span class="muted">${esc(partner.name)}: ${signed(theirs2)}${verdict > 0 && theirs2 > 0 ? ' — good for both, easy sell.' : verdict > 0 && vGive >= vGet * 0.97 ? ' — looks fair to them on paper.' : ''}</span>` : ''}</p>
       ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}. A team left a player short fills the spot with the best free agent for its lineup.</p>` : ''}
@@ -1039,6 +1046,19 @@ function vWatchlist() {
   </section>`;
 }
 
+// How trade value is built for a player: reputation vs current form.
+function vMarket(p) {
+  const x = A.marketParts(state.model, p, state.settings.basis);
+  if (x.rep == null) return '';
+  const bits = [x.adp ? `ADP ${f1(x.adp)}` : x.espnRank ? `ESPN rank ${x.espnRank}` : '', x.auction ? `$${Math.round(x.auction)} auction` : '',
+    x.prev != null ? `last season ${f1(x.prev)}` : '', x.proj != null ? `ESPN proj ${f1(x.proj)}` : ''].filter(Boolean).join(' · ');
+  const gap = x.current - x.rep;
+  const read = Math.abs(gap) < 3 ? 'Playing to their name.'
+    : gap > 0 ? 'Playing above their name: a sell-high chip, but most managers won’t pay full price yet.'
+    : 'Playing below their name: other managers still value them, so they cost more than current stats suggest.';
+  return `<div class="usage"><b>Name value ${f1(x.rep)}</b> (${bits}). This season ${f1(x.current)}. ${read}</div>`;
+}
+
 // Usage outlook for the player's next game, and when it changes over the next two weeks.
 function vUsage(p) {
   const m = state.model, b = state.settings.basis;
@@ -1093,8 +1113,11 @@ function vDrawer() {
     </div>
     ${vWorth(p, ownerId)}
     ${vUsage(p)}
+    ${vMarket(p)}
     <div class="facts">
       <div><span class="k">Avg</span><span class="v">${f1(avgOf(p))}</span></div><div><span class="k">Proj/G</span><span class="v">${f1(val(p))}</span></div>
+      <div title="What other managers think they're worth: draft position, last season, ESPN projection and this season"><span class="k">Trade value</span><span class="v">${f1(A.marketValue(m, p, state.settings.basis))}</span></div>
+      <div><span class="k">Draft</span><span class="v">${p.adp ? 'ADP ' + Math.round(p.adp) : p.espnRank ? '#' + p.espnRank : '–'}</span></div>
       <div><span class="k">Games left</span><span class="v">${A.gamesIn(m, p, state.an.rem)}</span></div>
       <div><span class="k">Playoff G</span><span class="v">${A.gamesIn(m, p, po)}</span></div>
     </div>

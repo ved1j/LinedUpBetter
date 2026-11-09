@@ -90,8 +90,29 @@ export async function loadLeague({ leagueId, season }) {
     getJSON(`${leagueUrl}?view=kona_player_info`, faFilter),
   ]);
   const model = normalize(league, pro, fa, season, leagueId);
-  await addInjuryReturns(model, leagueUrl);
+  await Promise.all([addInjuryReturns(model, leagueUrl), addMarketData(model, leagueUrl)]);
   return model;
+}
+
+// Draft position, auction value and ESPN rank ("name value") come with ESPN's player
+// views. Free agents already have them; fetch them once for rostered players that don't.
+async function addMarketData(model, leagueUrl) {
+  const need = model.teams.flatMap(t => t.roster).filter(p => p.adp == null && p.espnRank == null);
+  if (!need.length) return;
+  try {
+    const ids = [...new Set(need.map(p => p.id))];
+    const data = await getJSON(`${leagueUrl}?view=kona_player_info`, { players: { filterIds: { value: ids }, limit: ids.length } });
+    const byId = new Map((data.players || []).map(e => [e.id ?? e.player?.id, e.player]));
+    for (const p of need) {
+      const x = byId.get(p.id);
+      if (!x) continue;
+      p.adp = x.ownership?.averageDraftPosition || null;
+      p.auction = x.ownership?.auctionValueAverage ?? null;
+      p.espnRank = x.draftRanksByRankType?.STANDARD?.rank || null;
+    }
+  } catch (e) {
+    console.warn('Draft/market data unavailable', e);
+  }
 }
 
 // Expected return dates only come with ESPN's player-card view, so fetch it once for
@@ -351,6 +372,9 @@ function normPlayer(p, { slot = null, status = null, season, pts }) {
     slots: (p.eligibleSlots || []).filter(x => x < 12),
     injury: p.injuryStatus || (p.injured ? 'OUT' : 'ACTIVE'),
     owned: p.ownership?.percentOwned ?? null,
+    adp: p.ownership?.averageDraftPosition || null,
+    auction: p.ownership?.auctionValueAverage ?? null,
+    espnRank: p.draftRanksByRankType?.STANDARD?.rank || null,
     newsAt: p.lastNewsDate || null,
     ownedChange: p.ownership?.percentChange ?? null,
     slot,

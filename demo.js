@@ -102,6 +102,10 @@ export function makeDemo() {
     owned: +rand(0, 45).toFixed(1), ownedChange: +rand(-4, 9).toFixed(1), status: r() < 0.15 ? 'WAIVERS' : 'FREEAGENT',
   }));
   freeAgents.forEach(setGp);
+  // Draft position / ESPN rank from last season (with some noise), like real ADP.
+  [...teams.flatMap(t => t.roster), ...freeAgents]
+    .sort((a, b) => (b.stats.prev.avg + rand(-4, 4)) - (a.stats.prev.avg + rand(-4, 4)))
+    .forEach((p, i) => { p.espnRank = i + 1; p.adp = i < 170 ? +((i + 1) * rand(0.85, 1.2)).toFixed(1) : null; p.auction = Math.max(0, +(60 - i * 0.45).toFixed(1)); });
   for (const p of freeAgents) if (p.injury === 'OUT') injure(p);
 
   // Round-robin schedule (circle method).
