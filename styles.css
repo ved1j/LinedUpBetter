@@ -351,3 +351,108 @@ td.day.sel { background: rgba(212, 255, 58, .05); }
 .board.future .side .pts { opacity: .78; }
 .board .side .tn .tlink { font-weight: 600; }
 .drawer .facts { grid-template-columns: repeat(2, 1fr); }
+
+/* ---------- header freshness, toasts, news dots */
+.upd { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: var(--volt); color: var(--ink); font-weight: 600; font-size: 12.5px; padding: 8px 14px; border-radius: 8px; z-index: 20; box-shadow: 0 6px 24px rgba(0, 0, 0, .4); animation: rise .18s ease-out; }
+@keyframes rise { from { transform: translate(-50%, 8px); opacity: 0; } }
+.newsdot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--info); margin-left: 6px; vertical-align: 2px; box-shadow: 0 0 0 3px rgba(185, 183, 174, .15); }
+
+/* ---------- trade ideas */
+.scan { padding: 4px 0 2px; }
+.scanbar { height: 4px; background: rgba(255, 255, 255, .08); border-radius: 2px; overflow: hidden; margin-bottom: 10px; }
+.scanbar i { display: block; height: 100%; background: var(--volt); transition: width .15s; }
+.ideas { display: flex; flex-direction: column; gap: 10px; }
+.idea { border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 12px; background: var(--surface-2); }
+.idea-top { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.kind { font-family: var(--display); font-weight: 700; font-size: 10px; letter-spacing: .12em; text-transform: uppercase; padding: 2px 6px; border-radius: 3px; }
+.kind.win-win { background: var(--volt); color: var(--ink); }
+.kind.fair { border: 1px solid var(--line-2); color: var(--info); }
+.g-me { font-family: var(--display); font-weight: 800; font-size: 18px; color: var(--volt); }
+.g-them { font-family: var(--display); font-weight: 700; font-size: 13px; }
+.idea-swap { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; margin: 8px 0; }
+.idea-swap .rk-label { margin: 0 0 4px; }
+.arrowx { color: var(--dim); font-size: 18px; }
+.tchip { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
+.tchip .num { font-family: var(--display); font-weight: 700; color: var(--muted); }
+.idea-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.tlink.small { font-size: 11px; font-weight: 500; color: var(--muted); }
+
+/* ---------- team needs */
+.needs { display: flex; flex-direction: column; gap: 6px; }
+.need { display: grid; grid-template-columns: 56px 1fr 74px; align-items: center; gap: 10px; }
+.nl { font-family: var(--display); font-weight: 700; font-size: 12px; letter-spacing: .08em; }
+.nl small { color: var(--muted); margin-left: 2px; }
+.nbar { position: relative; height: 8px; background: rgba(255, 255, 255, .06); border-radius: 4px; }
+.nbar i { display: block; height: 100%; border-radius: 4px; background: var(--info); opacity: .7; }
+.nbar b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); border-radius: 1px; }
+.need.weak .nbar i { background: var(--bad); opacity: .85; }
+.need.strong .nbar i { background: var(--volt); opacity: .9; }
+.need.weak .nl { color: var(--bad); }
+.need.strong .nl { color: var(--volt); }
+.nv { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; }
+.nv small { font-size: 10.5px; margin-left: 2px; }
+
+/* ---------- player worth (panel) */
+.worth { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--surface-2); }
+.worth span { color: var(--muted); font-size: 12px; }
+.worth b { font-family: var(--display); font-weight: 800; font-size: 20px; }
+.worth small { color: var(--muted); font-size: 11px; }
+
+/* ---------- roster plan */
+.gm.st { border-color: rgba(212, 255, 58, .55); }
+.gm.bn { opacity: .38; border-style: dashed; }
+.gm.inj { color: var(--bad); border-color: rgba(255, 90, 78, .45); text-decoration: line-through; }
+.key { font-weight: 600; }
+.key.st { color: var(--volt); }
+.key.bn { opacity: .5; }
+.key.inj { color: var(--bad); }
+.dpts { font-family: var(--display); font-weight: 700; font-size: 11.5px; color: var(--text); }
+
+/* ---------- day by day */
+.ddlist { display: flex; flex-direction: column; }
+.dd { display: grid; grid-template-columns: 58px 1fr 92px 64px 56px 62px; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+.dd:first-child { border-top: 0; }
+.dd.today .dl { color: var(--volt); }
+.dl { font-family: var(--display); font-weight: 700; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.dl small { color: var(--muted); }
+.dbars { display: flex; flex-direction: column; gap: 3px; }
+.db { height: 6px; border-radius: 3px; min-width: 2px; }
+.db.me { background: var(--volt); }
+.db.them { background: rgba(255, 255, 255, .28); }
+.lg { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 3px 0 8px; vertical-align: -1px; }
+.lg.me { background: var(--volt); }
+.lg.them { background: rgba(255, 255, 255, .28); }
+.dv { text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); }
+.dv b { color: var(--text); }
+.dg { color: var(--muted); font-size: 11.5px; text-align: right; }
+.de { text-align: right; font-family: var(--display); font-weight: 700; }
+.dopen { font-family: var(--display); font-weight: 700; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink); background: var(--bad); border-radius: 3px; padding: 2px 5px; text-align: center; cursor: pointer; }
+
+/* ---------- news */
+.newsrow { display: grid; grid-template-columns: 180px 1fr; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); align-items: start; }
+.newsrow:first-of-type { border-top: 0; }
+.newsitem { padding: 6px 0; border-top: 1px solid var(--line); }
+.newsitem:first-child { border-top: 0; padding-top: 0; }
+.nh { font-weight: 600; font-size: 12.5px; line-height: 1.4; }
+.ns { color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 3px; }
+.nm { color: var(--dim); font-size: 11px; margin-top: 3px; }
+.nm a { color: var(--volt); text-decoration: none; }
+.drawer .newsbox { max-height: 260px; overflow: auto; }
+
+/* ---------- projection breakdown */
+.card h3 .wknav { margin-left: 8px; font-size: 12px; letter-spacing: .1em; }
+.bd-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding-bottom: 6px; font-size: 12.5px; }
+.bd-head span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.bd-head span b { color: var(--volt); font-family: var(--display); font-size: 16px; }
+.bd td { padding: 5px 6px; }
+.bd small { margin-left: 1px; }
+tr.dim td { opacity: .55; }
+.bdgrid { align-items: start; }
+
+/* ---------- power rankings */
+.pbar { position: relative; height: 18px; min-width: 140px; }
+.pbar i { position: absolute; left: 0; top: 4px; bottom: 4px; border-radius: 3px; background: rgba(212, 255, 58, .35); }
+.pbar span { position: relative; padding-left: 6px; font-family: var(--display); font-weight: 700; font-size: 13px; line-height: 18px; }
+tr.me .pbar i { background: var(--volt); }
+tr.me .pbar span { color: var(--ink); }

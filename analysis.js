@@ -93,10 +93,21 @@ const SLOT_RANK = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 7: 1, 8: 1, 9: 1, 10: 1, 5: 2,
 // Best lineup for one day: players are taken best-first and placed with augmenting
 // paths (bumping an already-placed player to another slot they can play). Greedy by
 // value + augmenting paths is optimal here, because lineups form a transversal matroid.
-export function fillLineup(players, slots) {
+// Slot orders and each player's eligible slot indices are cached per slot layout: this
+// runs thousands of times during trade scans.
+const orderCache = new Map();
+const eligCache = new WeakMap();
+export function fillLineup(players, slots, key = slots.join(',')) {
   const owner = new Array(slots.length).fill(-1);
-  const order = slots.map((s, i) => i).sort((a, b) => (SLOT_RANK[slots[a]] ?? 3) - (SLOT_RANK[slots[b]] ?? 3));
-  const fits = pl => (pl.p.slots?.length ? order.filter(i => pl.p.slots.includes(slots[i])) : order);
+  let order = orderCache.get(key);
+  if (!order) orderCache.set(key, order = slots.map((s, i) => i).sort((a, b) => (SLOT_RANK[slots[a]] ?? 3) - (SLOT_RANK[slots[b]] ?? 3)));
+  const fits = pl => {
+    let byKey = eligCache.get(pl.p);
+    if (!byKey) eligCache.set(pl.p, byKey = new Map());
+    let idx = byKey.get(key);
+    if (!idx) byKey.set(key, idx = pl.p.slots?.length ? order.filter(i => pl.p.slots.includes(slots[i])) : order);
+    return idx;
+  };
   const elig = players.map(fits);
   const used = [];
   players.forEach((pl, i) => {
@@ -115,23 +126,42 @@ export function fillLineup(players, slots) {
 }
 
 // Simulates each day: healthy players with a game fill the league's starting slots,
-// respecting position eligibility.
-export function projectDays(m, roster, sps, basis) {
-  // Injured players (including anyone in an IR slot) count from the day they're expected back.
-  const active = roster;
+// respecting position eligibility. Injured players (including anyone in an IR slot)
+// count from the day they're expected back. With track=true it also tallies, per
+// player, games started / benched / missed injured and points, and points per slot.
+export function projectDays(m, roster, sps, basis, track = false) {
   const slots = startingSlots(m);
-  const vals = new Map(active.map(p => [p, value(p, basis)]));
+  const slotsKey = slots.join(',');
+  const vals = new Map(roster.map(p => [p, value(p, basis)]));
   const now = Date.now();
+  const players = track ? new Map(roster.map(p => [p, { g: 0, pts: 0, avail: 0, bench: 0, out: 0 }])) : null;
+  const slotPts = track ? {} : null;
   let total = 0, games = 0;
   const days = [];
   for (const sp of sps) {
-    const playing = active.filter(p => gameLeft(m, p, sp, now) && availableOn(m, p, sp))
-      .map(p => ({ p, v: vals.get(p) * dtdFactor(m, p, sp) })).sort((a, b) => b.v - a.v);
-    const daySlots = sp === m.currentSP ? slotsLeftToday(m, roster) : slots;
-    const { used } = fillLineup(playing, daySlots);
+    const playing = [];
+    for (const p of roster) {
+      if (!gameLeft(m, p, sp, now)) continue;
+      if (!availableOn(m, p, sp)) { if (track) players.get(p).out++; continue; }
+      playing.push({ p, v: vals.get(p) * dtdFactor(m, p, sp) });
+    }
+    playing.sort((a, b) => b.v - a.v);
+    const today = sp === m.currentSP;
+    const daySlots = today ? slotsLeftToday(m, roster) : slots;
+    const { used, owner } = fillLineup(playing, daySlots, today ? daySlots.join(',') : slotsKey);
     const pts = used.reduce((a, x) => a + x.v, 0);
     total += pts;
     games += used.length;
+    if (track) {
+      for (const x of playing) players.get(x.p).avail++;
+      owner.forEach((pi, si) => {
+        if (pi < 0) return;
+        const x = playing[pi], t = players.get(x.p);
+        t.g++; t.pts += x.v;
+        slotPts[daySlots[si]] = (slotPts[daySlots[si]] || 0) + x.v;
+      });
+      for (const x of playing) { const t = players.get(x.p); t.bench = t.avail - t.g; }
+    }
     days.push({
       sp, pts, starters: used.map(x => x.p),
       playing: playing.length,
@@ -139,7 +169,16 @@ export function projectDays(m, roster, sps, basis) {
       benched: playing.length - used.length,
     });
   }
-  return { total, games, days };
+  return { total, games, days, players, slotPts };
+}
+
+// Evenly spaced subset of days (for season-long simulations), with the factor that
+// scales a sampled total back up to the full window.
+export function sampleDays(sps, max = 48) {
+  if (sps.length <= max) return { days: sps, scale: 1 };
+  const step = sps.length / max;
+  const days = Array.from({ length: max }, (_, i) => sps[Math.floor(i * step)]);
+  return { days, scale: sps.length / max };
 }
 
 // Today's starting slots that are still open: starters whose game already tipped off
@@ -260,18 +299,27 @@ export function seasonWindows(m) {
   return { week, ros, po };
 }
 
-// Projected points for a team before/after a trade, in each window. If the team ends up
-// with more players than before, its lowest-value players are dropped to make room.
-export function tradeImpact(m, team, give, get, basis) {
-  const before = team.roster;
-  let after = [...before.filter(p => !give.includes(p)), ...get];
+// Roster after a trade. Incoming players arrive on the bench; if the team now has more
+// players than before, it drops its least useful ones (out-for-season first, then
+// lowest value), never a player it just received.
+export function applyTrade(roster, give, get, basis) {
+  const giveIds = new Set(give.map(p => p.id)), getIds = new Set(get.map(p => p.id));
+  let after = [...roster.filter(p => !giveIds.has(p.id)), ...get.map(p => ({ ...p, slot: 12 }))];
   const drops = [];
-  while (after.length > before.length) {
-    const d = after.filter(p => p.slot !== 13 && !get.includes(p)).sort((a, b) => value(a, basis) - value(b, basis))[0]
-      || after.slice().sort((a, b) => value(a, basis) - value(b, basis))[0];
+  const worth = p => (p.outForSeason ? -1 : value(p, basis));
+  while (after.length > roster.length) {
+    const pool = after.filter(p => !getIds.has(p.id));
+    const d = (pool.length ? pool : after).reduce((a, b) => (worth(b) < worth(a) ? b : a));
     drops.push(d);
     after = after.filter(p => p !== d);
   }
+  return { after, drops };
+}
+
+// Projected points for a team before/after a trade, in each window.
+export function tradeImpact(m, team, give, get, basis) {
+  const before = team.roster;
+  const { after, drops } = applyTrade(before, give, get, basis);
   const w = seasonWindows(m);
   const calc = r => ({
     week: projectDays(m, r, w.week, basis).total,
@@ -320,7 +368,7 @@ export function projectMatchup(m, period, home, away, basis, homePts = 0, awayPt
   // Uncertainty: ~12.5 FP per player-game of noise, plus ~6% for lineup/minutes changes.
   const sd = Math.sqrt((h.games + a.games) * 160 + (0.06 * (h.total + a.total)) ** 2) + 5;
   const winProb = days.length ? phi((hp - ap) / sd) : (hp > ap ? 1 : hp < ap ? 0 : 0.5);
-  return { homeProj: hp, awayProj: ap, homeGames: h.games, awayGames: a.games, winProb, final: !days.length };
+  return { homeProj: hp, awayProj: ap, homeGames: h.games, awayGames: a.games, winProb, final: !days.length, homeDays: h.days, awayDays: a.days || [] };
 }
 
 // Every matchup in a period, with live score and projection.
@@ -371,6 +419,7 @@ export function analyze(m, basis = 'smart') {
       matchup = {
         opp, myPts: mine.pts, oppPts: theirs.pts, myProj: pr.homeProj, oppProj: pr.awayProj,
         myGames: pr.homeGames, oppGames: pr.awayGames, winProb: pr.winProb,
+        myDays: pr.homeDays, oppDays: pr.awayDays,
       };
     } else matchup = { bye: true };
   }
@@ -392,9 +441,17 @@ export function analyze(m, basis = 'smart') {
       p, v, gl, score, weekGain,
       rosGain: v - dropV,
       poGames: gamesIn(m, p, po),
+      nextG: gamesIn(m, p, m.periods[m.currentPeriod + 1] || []),
       trend: s.l15 && s.season && s.season.gp >= 8 ? s.l15.avg - s.season.avg : null,
+      rosFP: null,
     };
   });
+  // Rest-of-season value of each top free agent if swapped in for the drop candidate.
+  if (drop) {
+    const ctx = seasonContext(m, basis, 36);
+    const rosBase = ctx.S(my.roster);
+    for (const w of waivers.slice().sort((a, b) => b.v - a.v).slice(0, 80)) w.rosFP = ctx.S([...without, w.p]) - rosBase;
+  }
 
   // ---- Notes
   const notes = [];
@@ -451,7 +508,7 @@ export function analyze(m, basis = 'smart') {
   }
   if (drop) {
     const bestRos = waivers.filter(w => !isOut(w.p)).sort((a, b) => b.v - a.v)[0];
-    if (bestRos && bestRos.rosGain >= 2) note('good', 'Waiver', `${bestRos.p.name} over ${drop.name}`, `${bestRos.v.toFixed(1)} vs ${dropV.toFixed(1)} FP/G rest of season.`);
+    if (bestRos && bestRos.rosGain >= 2) note('good', 'Waiver', `${bestRos.p.name} over ${drop.name}`, `${bestRos.v.toFixed(1)} vs ${dropV.toFixed(1)} proj/G rest of season.`);
   }
   if (m.acqLimit > 0) {
     const used = my.acq?.[m.currentPeriod] || 0;
@@ -460,4 +517,185 @@ export function analyze(m, basis = 'smart') {
   if (!notes.length) note('good', 'Lineup', 'Clean lineup', 'No injured starters and no open slots.');
 
   return { my, rem, base, matchup, waivers, drop, dropV, feedback: notes, lineup: lc, plan };
+}
+
+// ---- Season-long evaluation: team needs, trade ideas, targets, power rankings
+
+// Remaining regular-season days plus the fantasy playoffs: what a trade is judged on.
+export function futureDays(m) {
+  const w = seasonWindows(m);
+  return [...w.ros, ...w.po.filter(sp => sp >= m.currentSP)];
+}
+
+// Shared sampled window + scorer so every trade is compared on identical days.
+export function seasonContext(m, basis, max = 48) {
+  const { days, scale } = sampleDays(futureDays(m), max);
+  return { days, scale, S: roster => projectDays(m, roster, days, basis).total * scale };
+}
+
+const SLOT_GROUP = { 0: 'PG', 1: 'SG', 2: 'SF', 3: 'PF', 4: 'C', 5: 'G', 6: 'F', 7: 'SG/SF', 8: 'G/F', 9: 'PF/C', 10: 'F/C', 11: 'UTIL' };
+
+// How well each team fills each starting slot over the rest of the season (points per
+// slot per day), against the league average for that slot. Also flags each team's
+// "trade chips": useful players who often sit because the lineup is full.
+export function teamNeeds(m, basis) {
+  const { days } = sampleDays(futureDays(m), 40);
+  const slots = startingSlots(m);
+  const count = {};
+  for (const s of slots) count[s] = (count[s] || 0) + 1;
+  const ids = Object.keys(count).map(Number).sort((a, b) => (SLOT_RANK[a] ?? 3) - (SLOT_RANK[b] ?? 3) || a - b);
+  const byTeam = {};
+  for (const t of m.teams) {
+    const r = projectDays(m, t.roster, days, basis, true);
+    const n = Math.max(1, days.length);
+    const perSlot = Object.fromEntries(ids.map(id => [id, (r.slotPts[id] || 0) / n / count[id]]));
+    const chips = [...r.players.entries()]
+      .filter(([p, x]) => x.avail >= 6 && x.g / x.avail < 0.7 && value(p, basis) >= 15)
+      .map(([p, x]) => ({ p, startRate: x.g / x.avail }))
+      .sort((a, b) => value(b.p, basis) - value(a.p, basis));
+    const dead = [...r.players.entries()].filter(([p, x]) => x.g === 0 && (x.out > 0 || x.avail > 0)).map(([p]) => p);
+    byTeam[t.id] = { perSlot, perDay: r.total / n, chips, dead, players: r.players };
+  }
+  const league = Object.fromEntries(ids.map(id => [id, m.teams.reduce((a, t) => a + byTeam[t.id].perSlot[id], 0) / Math.max(1, m.teams.length)]));
+  for (const t of m.teams) {
+    const b = byTeam[t.id];
+    b.diff = Object.fromEntries(ids.map(id => [id, b.perSlot[id] - league[id]]));
+    b.weak = ids.filter(id => b.diff[id] < -0.12 * league[id]).sort((a, c) => b.diff[a] - b.diff[c]);
+    b.strong = ids.filter(id => b.diff[id] > 0.12 * league[id]).sort((a, c) => b.diff[c] - b.diff[a]);
+  }
+  return { ids, label: id => SLOT_GROUP[id] || String(id), count, league, byTeam, days: days.length };
+}
+
+// Trade ideas with one other team: 1-for-1 swaps of similar value, 2-for-1
+// consolidations (two of yours for one better player) and 1-for-2 depth deals. Each is
+// scored on rest-of-season + playoff projections for BOTH rosters, so suggestions fix a
+// real lineup need for you without obviously hurting them.
+export const DEAL_TYPES = ['1for1', '2for1', '1for2'];
+export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TYPES) {
+  const v = p => value(p, basis);
+  const theirBase = ctx.S(other.roster);
+  const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 9);
+  const mine = pieces(my), theirs = pieces(other);
+  const sum = ps => ps.reduce((a, p) => a + v(p), 0);
+  const out = [];
+  const consider = (give, get) => {
+    const a = applyTrade(my.roster, give, get, basis);
+    // Screening on sampled days is loose on purpose; refineIdeas re-checks exactly.
+    const myGain = ctx.S(a.after) - myBase;
+    if (myGain < 0) return;
+    const z = applyTrade(other.roster, get, give, basis);
+    const theirGain = ctx.S(z.after) - theirBase;
+    const giveV = sum(give), getV = sum(get);
+    // Same acceptance rule as the exact pass, with slack for sampling noise.
+    const slack = 60 + 0.15 * Math.abs(myGain);
+    const rated = rateIdea(myGain + slack, theirGain + slack, giveV * 1.03, getV);
+    if (!rated) return;
+    out.push({ partner: other, give, get, myGain, theirGain, giveV, getV, drops: a.drops, theirDrops: z.drops, score: rated.score });
+  };
+  if (types.includes('1for1')) for (const a of mine) for (const b of theirs) {
+    const r = v(b) / Math.max(1, v(a));
+    if (r >= 0.8 && r <= 1.3) consider([a], [b]);
+  }
+  if (types.includes('2for1')) for (let i = 0; i < mine.length; i++) for (let j = i + 1; j < mine.length; j++) {
+    const two = v(mine[i]) + v(mine[j]);
+    for (const b of theirs.slice(0, 6)) {
+      // 2-for-1: the single player is better than either, worth 60–90% of the pair.
+      if (v(b) <= Math.max(v(mine[i]), v(mine[j])) || v(b) > 0.9 * two || v(b) < 0.6 * two) continue;
+      consider([mine[i], mine[j]], [b]);
+    }
+  }
+  if (types.includes('1for2')) for (const a of mine.slice(0, 6)) for (let i = 0; i < theirs.length; i++) for (let j = i + 1; j < theirs.length; j++) {
+    const two = v(theirs[i]) + v(theirs[j]);
+    if (v(a) <= Math.max(v(theirs[i]), v(theirs[j])) || v(a) > 0.9 * two || v(a) < 0.6 * two) continue;
+    consider([a], [theirs[i], theirs[j]]);
+  }
+  return keepBest(out);
+}
+
+// Best few ideas for one partner, without repeating the same incoming players.
+export function keepBest(ideas, n = 6) {
+  const kept = [], seen = new Set();
+  for (const x of ideas.slice().sort((a, b) => b.score - a.score)) {
+    const key = x.get.map(p => p.id).join(',');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    kept.push(x);
+    if (kept.length >= n) break;
+  }
+  return kept;
+}
+
+// Would they plausibly say yes? Either it helps them too, or it looks fair on paper
+// (they receive at least as much per-game value) and doesn't cost them much. Ranked by
+// your gain, nudged up when it helps them too (easier yes) and down harder when it
+// costs them (harder sell).
+function rateIdea(myGain, theirGain, giveV, getV) {
+  if (myGain < 12) return null;
+  const winWin = theirGain >= 0;
+  const fair = giveV >= getV * 0.97 && theirGain >= -0.5 * myGain;
+  if (!winWin && !fair) return null;
+  return { kind: winWin ? 'win-win' : 'fair', score: myGain + (winWin ? 0.6 * Math.min(theirGain, myGain) : 1.2 * theirGain) };
+}
+
+// Re-score the most promising screened ideas on every remaining day (no sampling), so
+// the numbers match the trade analyzer exactly; drop any that no longer hold up.
+export function refineIdeas(m, my, ideas, basis, top = 30) {
+  const days = futureDays(m);
+  const S = roster => projectDays(m, roster, days, basis).total;
+  const base = new Map();
+  const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster)); return base.get(t.id); };
+  const out = [];
+  for (const x of ideas.slice().sort((a, b) => b.score - a.score).slice(0, top)) {
+    const a = applyTrade(my.roster, x.give, x.get, basis);
+    const z = applyTrade(x.partner.roster, x.get, x.give, basis);
+    const myGain = S(a.after) - baseOf(my), theirGain = S(z.after) - baseOf(x.partner);
+    const rated = rateIdea(myGain, theirGain, x.giveV, x.getV);
+    if (rated) out.push({ ...x, myGain, theirGain, drops: a.drops, theirDrops: z.drops, ...rated });
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+
+// Why a trade helps: which lineup slots get stronger and how many more starts you get.
+export function tradeReason(m, my, idea, basis, ctx) {
+  const before = projectDays(m, my.roster, ctx.days, basis, true);
+  const after = projectDays(m, applyTrade(my.roster, idea.give, idea.get, basis).after, ctx.days, basis, true);
+  const n = Math.max(1, ctx.days.length);
+  const deltas = Object.keys({ ...before.slotPts, ...after.slotPts }).map(Number)
+    .map(id => ({ id, d: ((after.slotPts[id] || 0) - (before.slotPts[id] || 0)) / n }))
+    .sort((a, b) => b.d - a.d);
+  return { starts: Math.round((after.games - before.games) * ctx.scale), best: deltas[0]?.d > 0.5 ? deltas[0] : null, label: id => SLOT_GROUP[id] };
+}
+
+// Players on other teams who would add the most to your lineup the rest of the way
+// (after dropping your least useful player to make room).
+export function tradeTargets(m, my, basis, ctx, myBase, limit = 10) {
+  const v = p => value(p, basis);
+  return m.teams.filter(t => t.id !== my.id)
+    .flatMap(t => t.roster.filter(p => !p.outForSeason).map(p => ({ p, owner: t })))
+    .sort((a, b) => v(b.p) - v(a.p)).slice(0, 60)
+    .map(x => ({ ...x, gain: ctx.S(applyTrade(my.roster, [], [x.p], basis).after) - myBase }))
+    .filter(x => x.gain > 0)
+    .sort((a, b) => b.gain - a.gain).slice(0, limit);
+}
+
+// Power rankings: projected strength from here on (per week), blended with results so far.
+export function powerRankings(m, basis, needs) {
+  const rows = m.teams.map(t => {
+    const gp = t.wins + t.losses + t.ties;
+    return { team: t, projWk: needs.byTeam[t.id].perDay * 7, pfWk: gp ? t.pf / gp : null, gp };
+  });
+  const avg = k => rows.reduce((a, r) => a + (r[k] ?? 0), 0) / Math.max(1, rows.filter(r => r[k] != null).length);
+  const aProj = avg('projWk'), aPf = avg('pfWk') || aProj;
+  for (const r of rows) {
+    // Results matter more as the season goes on (up to 40% after ~8 matchups).
+    const wRes = Math.min(0.4, r.gp * 0.05);
+    r.power = (1 - wRes) * (r.projWk / aProj) + wRes * ((r.pfWk ?? aPf) / aPf);
+  }
+  return rows.sort((a, b) => b.power - a.power);
+}
+
+// Per-player projection for a team in a given matchup (games started, benched, out).
+export function breakdown(m, team, period, basis) {
+  const r = projectDays(m, team.roster, daysLeft(m, period), basis, true);
+  return { total: r.total, games: r.games, rows: [...r.players.entries()].map(([p, x]) => ({ p, ...x })).sort((a, b) => b.pts - a.pts || b.avail - a.avail) };
 }

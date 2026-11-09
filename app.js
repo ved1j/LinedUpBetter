@@ -1,4 +1,4 @@
-import { loadLeague, setTransport, PRO_ABBR, SLOT, STAT_NAMES } from './api.js';
+import { loadLeague, setTransport, fetchPlayerNews, PRO_ABBR, SLOT, STAT_NAMES } from './api.js';
 import { makeDemo } from './demo.js';
 import * as A from './analysis.js';
 
@@ -30,6 +30,9 @@ const state = {
   openPlayer: null,
   trade: { partner: null, give: [], get: [] },
   oddsCache: null,
+  calc: {},          // memoized season-long results, keyed by data + settings
+  scan: null,        // trade-ideas scan: { key, status, done, total, ideas, targets }
+  news: new Map(),   // playerId -> { status: 'loading' | 'ok' | 'error', items, at }
   wv: { pos: 'ALL', sort: 'score', showInjured: false },
 };
 
@@ -51,6 +54,37 @@ const noteOf = id => state.pnotes[id]?.note || '';
 const savePNotes = () => store.set(`pnotes:${leagueKey()}`, state.pnotes);
 const pct = x => (Number.isFinite(x) ? `${Math.min(99, Math.max(1, Math.round(x * 100)))}%` : '–');
 const STAR = '<span class="star" title="Starred">★</span>';
+const FRESH_NEWS_MS = 24 * 3600e3;
+const hasFreshNews = p => p.newsAt && Date.now() - p.newsAt < FRESH_NEWS_MS;
+function ago(ms) {
+  const min = Math.round((Date.now() - ms) / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const h = Math.round(min / 60);
+  return h < 48 ? `${h}h ago` : `${Math.round(h / 24)}d ago`;
+}
+const signed = (n, digits = 0) => `${n > 0 ? '+' : n < 0 ? '−' : ''}${digits ? Math.abs(n).toFixed(digits) : Math.round(Math.abs(n)).toLocaleString()}`;
+function toast(text) {
+  document.querySelector('.toast')?.remove();
+  const el = Object.assign(document.createElement('div'), { className: 'toast', textContent: text });
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2200);
+}
+// Memoize expensive season-long calculations until the data, projection basis or
+// viewed team changes.
+function memo(name, fn) {
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${Object.keys(state.pnotes).length}`;
+  const hit = state.calc[name];
+  if (hit?.key === key) return hit.v;
+  const v = fn();
+  state.calc[name] = { key, v };
+  return v;
+}
+const getNeeds = () => memo('needs', () => A.teamNeeds(state.model, state.settings.basis));
+const getCtx = () => memo('ctx', () => {
+  const ctx = A.seasonContext(state.model, state.settings.basis);
+  return { ...ctx, myBase: ctx.S(state.an.my.roster) };
+});
 
 function badge(p) {
   const map = { OUT: ['O', 'b-out'], INJURY_RESERVE: ['IR', 'b-out'], SUSPENSION: ['SSPD', 'b-out'], DAY_TO_DAY: ['DTD', 'b-dtd'], QUESTIONABLE: ['Q', 'b-dtd'] };
@@ -61,7 +95,8 @@ function badge(p) {
 function pCell(p, extra = '') {
   const pos = p.eligible?.length ? p.eligible.join('/') : p.pos;
   const marks = (isStar(p.id) ? STAR : '') + (noteOf(p.id) ? '<span class="has-note" title="Has notes">✎</span>' : '');
-  return `<div class="pl"><span class="pn" data-player="${p.id}" title="Notes & details">${esc(p.name)}${marks}${badge(p)}${extra}</span><span class="pm">${esc(abbr(p))} · ${esc(pos)}</span></div>`;
+  const news = hasFreshNews(p) ? `<span class="newsdot" title="News ${ago(p.newsAt)}: open for details"></span>` : '';
+  return `<div class="pl"><span class="pn" data-player="${p.id}" title="Notes, news & details">${esc(p.name)}${marks}${news}${badge(p)}${extra}</span><span class="pm">${esc(abbr(p))} · ${esc(pos)}</span></div>`;
 }
 const trendCell = t => (t == null ? '<td class="num muted">–</td>' : `<td class="num ${t >= 1.5 ? 'up' : t <= -1.5 ? 'down' : 'muted'}">${t > 0 ? '+' : ''}${t.toFixed(1)}</td>`);
 
@@ -154,7 +189,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:v5:${s.leagueId}:${s.season}`; // bump when the parser changes
+      const key = `cache:v6:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {
@@ -238,7 +273,8 @@ function vHeader() {
     ${m ? vTeamPicker() : ''}
     <div class="spacer"></div>
     ${m ? `<label class="basis" title="How projected points per game (Proj/G) are calculated. Avg is always the real season average."><span>Proj</span><select data-act="basis">${opts}</select></label>` : ''}
-    <button class="ghost" data-act="refresh" title="Refresh from ESPN" aria-label="Refresh">${ICON.refresh}</button>
+    ${m?.fetchedAt ? `<span class="upd" title="Last loaded from ESPN">${ago(m.fetchedAt)}</span>` : ''}
+    <button class="ghost" data-act="refresh" title="Refresh from ESPN (R)" aria-label="Refresh">${ICON.refresh}</button>
     ${isExt && !full ? `<button class="ghost" data-act="expand" title="Open in a full tab" aria-label="Open full view">${ICON.expand}</button>` : ''}
   </header>
   <nav>${TABS.map(([k, v]) => `<button data-tab="${k}" class="${state.tab === k ? 'on' : ''}">${v}</button>`).join('')}</nav>`;
@@ -340,7 +376,66 @@ function vOverviewBody() {
       <button class="link" data-tab="waivers">Full waiver wire →</button>
     </section>
   </div>`;
-  return h;
+  return h + vDayByDay() + vRosterNews();
+}
+
+// Remaining days of the live matchup: your projected points and games vs theirs.
+function vDayByDay() {
+  const { an, model: m } = state;
+  const x = an.matchup;
+  if (!x || x.bye || !x.myDays?.length) return '';
+  const max = Math.max(1, ...x.myDays.map(d => d.pts), ...x.oppDays.map(d => d.pts));
+  const rows = x.myDays.map((d, i) => {
+    const o = x.oppDays[i] || { pts: 0, starters: [] };
+    const date = A.spDate(m, d.sp);
+    const edge = d.pts - o.pts;
+    return `<div class="dd ${d.sp === m.currentSP ? 'today' : ''}">
+      <span class="dl">${A.fmtDow(date)} <small>${date.getDate()}</small></span>
+      <div class="dbars"><div class="db me" style="width:${(d.pts / max * 100).toFixed(1)}%"></div><div class="db them" style="width:${(o.pts / max * 100).toFixed(1)}%"></div></div>
+      <span class="dv"><b>${f0(d.pts)}</b> – ${f0(o.pts)}</span>
+      <span class="dg" title="Games started, you vs them">${d.starters.length} v ${o.starters.length} g</span>
+      <span class="de ${edge >= 0 ? 'up' : 'down'}">${signed(edge)}</span>
+      ${d.open ? `<span class="dopen" data-tab="waivers" title="Empty lineup slots this day: stream someone who plays">${d.open} open</span>` : '<span></span>'}
+    </div>`;
+  }).join('');
+  return `<section class="card"><h3>Day by day vs ${esc(x.opp.name)} <span class="r muted small"><i class="lg me"></i>you <i class="lg them"></i>them · projected, rest of this matchup</span></h3><div class="ddlist">${rows}</div></section>`;
+}
+
+// ---- News
+function newsHtml(id, mode) {
+  if (state.model?.demo) return '<p class="muted small">News shows up for real ESPN leagues.</p>';
+  const n = state.news.get(id);
+  if (!n || n.status === 'loading') return '<p class="muted small">Loading news…</p>';
+  if (n.status === 'error') return '<p class="muted small">Couldn\'t load news right now.</p>';
+  if (!n.items.length) return '<p class="muted small">No news in the last 30 days.</p>';
+  const items = mode === 'one' ? n.items.slice(0, 1) : n.items;
+  return items.map(x => `<div class="newsitem">
+      <div class="nh">${esc(x.headline)}</div>
+      ${mode === 'one' || !x.story || x.story === x.headline ? '' : `<div class="ns">${esc(x.story.length > 420 ? x.story.slice(0, 420) + '…' : x.story)}</div>`}
+      <div class="nm">${x.published ? ago(Date.parse(x.published)) : ''}${x.type === 'Rotowire' ? ' · RotoWire' : x.type ? ' · ' + esc(x.type) : ''}${x.link && mode !== 'one' ? ` · <a href="${esc(x.link)}" target="_blank" rel="noopener">ESPN ↗</a>` : ''}</div>
+    </div>`).join('');
+}
+// Fetch news once per player per 10 minutes; fill any visible news boxes in place
+// (no full re-render, so typing in notes is never interrupted).
+function ensureNews(id) {
+  if (state.model?.demo) return;
+  const n = state.news.get(id);
+  if (n && (n.status === 'loading' || Date.now() - n.at < 10 * 60e3)) return;
+  state.news.set(id, { status: 'loading', items: [], at: Date.now() });
+  fetchPlayerNews(id)
+    .then(items => state.news.set(id, { status: 'ok', items, at: Date.now() }))
+    .catch(() => state.news.set(id, { status: 'error', items: [], at: Date.now() }))
+    .finally(() => document.querySelectorAll(`[data-news="${id}"]`).forEach(el => { el.innerHTML = newsHtml(id, el.dataset.mode); }));
+}
+
+function vRosterNews() {
+  const { an, model: m } = state;
+  if (m.demo) return '';
+  const recent = an.my.roster.filter(p => p.newsAt && Date.now() - p.newsAt < 4 * 24 * 3600e3).sort((a, b) => b.newsAt - a.newsAt).slice(0, 6);
+  if (!recent.length) return '';
+  setTimeout(() => recent.forEach(p => ensureNews(p.id)), 0);
+  return `<section class="card"><h3>Latest on ${esc(an.my.name)} <span class="r muted small">ESPN fantasy news · click a name for more</span></h3>
+    ${recent.map(p => `<div class="newsrow">${pCell(p)}<div class="newsbox" data-news="${p.id}" data-mode="one">${newsHtml(p.id, 'one')}</div></div>`).join('')}</section>`;
 }
 
 // Days to show in schedule grids. Long matchups (opening week, All-Star, playoffs)
@@ -362,13 +457,23 @@ function vRoster() {
     const cls = sp === m.currentSP ? 'today' : sp < m.currentSP ? 'past' : '';
     return `<th class="day ${cls}">${A.fmtDow(d)}<br>${d.getDate()}</th>`;
   }).join('');
+  // Best-lineup plan for each remaining day: who starts, who sits, who's out.
+  const plan = Object.fromEntries(an.base.days.map(d => [d.sp, new Set(d.starters)]));
   const rows = roster.map(p => {
     const s = p.stats;
     const cells = sps.map(sp => {
       const g = A.gameOn(m, p, sp);
       const cls = sp < m.currentSP ? 'past' : '';
-      const b2b = g && A.isB2B(m, p, sp);
-      return `<td class="day ${cls}">${g ? `<span class="gm ${g.home ? 'home' : ''} ${b2b ? 'b2b' : ''}" ${b2b ? 'title="Back-to-back: rest risk"' : ''}>${g.home ? '' : '@'}${esc(m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || '')}</span>` : ''}</td>`;
+      if (!g) return `<td class="day ${cls}"></td>`;
+      const b2b = A.isB2B(m, p, sp);
+      let st = '', tip = `${g.home ? 'vs' : '@'} ${m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || ''}`;
+      if (plan[sp] && A.gameLeft(m, p, sp)) {
+        if (!A.availableOn(m, p, sp)) { st = 'inj'; tip += ` · out (${A.returnLabel(p)})`; }
+        else if (plan[sp].has(p)) { st = 'st'; tip += ' · starts in your best lineup'; }
+        else { st = 'bn'; tip += ' · bench: lineup is full that day'; }
+      }
+      if (b2b) tip += ' · back-to-back';
+      return `<td class="day ${cls}"><span class="gm ${g.home ? 'home' : ''} ${b2b ? 'b2b' : ''} ${st}" title="${esc(tip)}">${g.home ? '' : '@'}${esc(m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || '')}</span></td>`;
     }).join('');
     return `<tr class="${p.slot === 13 ? 'ir' : ''}">
       <td class="slot">${SLOT[p.slot] ?? ''}</td><td>${pCell(p)}</td>
@@ -387,9 +492,10 @@ function vRoster() {
     <div class="scrollx"><table>
       <thead><tr><th>Slot</th><th>Player</th><th class="num" title="Projected FP per game (${A.BASIS[state.settings.basis]}) — what projections use">Proj/G</th><th class="num" title="Actual season average (matches ESPN)">Avg</th><th class="num">L15</th><th class="num">Δ</th><th class="num" title="Games left in this matchup">GL</th>${dayHead}</tr></thead>
       <tbody>${rows}</tbody>
-      <tfoot><tr><td colspan="7" class="num">Healthy players with a game / starting slots →</td>${foot}</tr></tfoot>
+      <tfoot><tr><td colspan="7" class="num">Healthy players with a game / starting slots →</td>${foot}</tr>
+        <tr><td colspan="7" class="num">Projected points →</td>${sps.map(sp => `<td class="day"><span class="dpts">${dayIdx[sp] ? f0(dayIdx[sp].pts) : ''}</span></td>`).join('')}</tr></tfoot>
     </table></div>
-    <p class="muted small">Red counts = empty lineup slots (stream someone). Amber = more players than slots (games left on your bench). “@” = road game. Dot = back-to-back (rest risk).</p>
+    <p class="muted small">Games left: <span class="key st">outlined</span> = starts in your best lineup, <span class="key bn">faded</span> = sits (lineup full), <span class="key inj">red</span> = injured. Red counts = empty slots (stream someone); amber = more players than slots. “@” = road game. Dot = back-to-back.</p>
   </section>`;
 }
 
@@ -401,7 +507,7 @@ function vWaivers() {
   if (w.day != null && !sps.includes(w.day)) w.day = null;
   let list = an.waivers.filter(x => (w.showInjured || !A.isOut(x.p)) && (w.pos === 'ALL' || x.p.eligible.includes(w.pos) || x.p.pos === w.pos)
     && (w.day == null || A.gameOn(m, x.p, w.day)));
-  const key = { score: x => x.score, avg: x => avgOf(x.p) ?? -1, v: x => x.v, week: x => x.weekGain, gl: x => x.gl, po: x => x.poGames, trend: x => x.trend ?? -99, own: x => x.p.ownedChange ?? -99 }[w.sort];
+  const key = { score: x => x.score, avg: x => avgOf(x.p) ?? -1, v: x => x.v, week: x => x.weekGain, ros: x => x.rosFP ?? -1e9, next: x => x.nextG, gl: x => x.gl, po: x => x.poGames, trend: x => x.trend ?? -99, own: x => x.p.ownedChange ?? -99 }[w.sort];
   list = list.sort((a, b) => key(b) - key(a)).slice(0, 60);
   const th = (k, label, title = '') => `<th class="num sort ${w.sort === k ? 'on' : ''}" data-sort="${k}" title="${title}">${label}</th>`;
   const rows = list.map(x => {
@@ -411,6 +517,7 @@ function vWaivers() {
     return `<tr><td>${pCell(x.p, up + wv)}</td>
       <td class="num"><b>${f1(x.score)}</b></td><td class="num">${f1(avgOf(x.p))}</td><td class="num">${f1(x.v)}</td>
       <td class="num">${x.gl}</td><td class="num ${x.weekGain > 0 ? 'up' : 'muted'}">${x.weekGain > 0 ? '+' : ''}${f0(x.weekGain)}</td>
+      <td class="num ${x.rosFP > 0 ? 'up' : 'muted'}">${x.rosFP == null ? '–' : signed(x.rosFP)}</td><td class="num">${x.nextG}</td>
       ${trendCell(x.trend)}<td class="num">${x.poGames}</td>
       <td class="num">${x.p.owned != null ? x.p.owned.toFixed(0) + '%' : '–'} <span class="small ${oc > 0 ? 'up' : oc < 0 ? 'down' : 'muted'}">${oc ? (oc > 0 ? '+' : '') + oc.toFixed(1) : ''}</span></td>
       ${sps.map(sp => {
@@ -437,6 +544,8 @@ function vWaivers() {
         ${th('v', 'Proj/G', 'Projected FP per game: ' + A.BASIS[state.settings.basis])}
         ${th('gl', 'GL', 'Games left this week')}
         ${th('week', 'Wk +FP', 'Projected points gained this week if you swap in for your drop candidate (accounts for open lineup slots)')}
+        ${th('ros', 'ROS +', 'Projected points gained over the rest of the season (incl. playoffs) if swapped in for your drop candidate')}
+        ${th('next', 'Next G', 'Games next matchup')}
         ${th('trend', 'Δ L15', 'Last 15 days avg minus season avg')}
         ${th('po', 'PO G', 'Games during fantasy playoffs')}
         ${th('own', '% Own', 'Rostered % and change — sort to find trending adds')}
@@ -446,9 +555,9 @@ function vWaivers() {
           const open = sp >= m.currentSP ? openOn[sp] || 0 : 0;
           return `<th class="day sort ${cls} ${w.day === sp ? 'on' : ''}" data-day="${sp}" title="Click to show only players with a game ${A.fmtDow(d)}${open ? ` · you have ${open} open slot${open > 1 ? 's' : ''}` : ''}">${A.fmtDow(d)}<br>${d.getDate()}${open ? `<span class="openmark">${open}</span>` : ''}</th>`;
         }).join('')}<th></th>
-      </tr></thead><tbody>${rows || `<tr><td colspan="${10 + sps.length}" class="muted">No players match.</td></tr>`}</tbody>
+      </tr></thead><tbody>${rows || `<tr><td colspan="${12 + sps.length}" class="muted">No players match.</td></tr>`}</tbody>
     </table></div>
-    <p class="muted small">Avg = real season average (same as ESPN). Proj/G = what projections use, blending the average with ESPN's projection early in the season. UPGRADE = better Proj/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
+    <p class="muted small">Avg = real season average (same as ESPN). Proj/G = what projections use, blending the average with ESPN's projection early in the season. Wk +FP / ROS + = projected points gained this matchup / rest of season if they replace your drop candidate. UPGRADE = better Proj/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
     ${vHidden()}
   </section>`;
 }
@@ -553,7 +662,30 @@ function vLeague() {
       <div class="scrollx"><table><thead><tr><th class="num">#</th><th>Team</th><th class="num">W-L</th><th class="num">GB</th><th class="num">PF</th><th class="num" title="Projected final record">Proj</th><th class="num" title="Chance to make the playoffs">Playoffs</th>${odds.byes ? '<th class="num" title="Chance of a first-round bye">Bye</th>' : ''}</tr></thead><tbody>${rows}</tbody></table></div>
       <p class="muted small">${odds.simulated ? `Simulated the ${odds.simulated} remaining regular-season matchups 3,000 times using each team's projected scores. Ties broken by points for.` : 'Regular season is over.'} Dashed line = playoff cut (top ${m.playoffTeamCount}).</p></section>
     ${vRules()}
-  </div>`;
+  </div>
+  ${vPower(st)}`;
+}
+
+function vPower(st) {
+  const { an } = state;
+  const needs = getNeeds();
+  const pr = A.powerRankings(state.model, state.settings.basis, needs);
+  const standRank = Object.fromEntries(st.map((t, i) => [t.id, i + 1]));
+  const max = Math.max(...pr.map(r => r.projWk));
+  const rows = pr.map((r, i) => {
+    const move = standRank[r.team.id] - (i + 1);
+    const nd = needs.byTeam[r.team.id];
+    return `<tr class="${r.team.id === an.my.id ? 'me' : ''}"><td class="num muted">${i + 1}</td>
+      <td><button class="tlink" data-view="${r.team.id}">${esc(r.team.name)}</button></td>
+      <td><div class="pbar"><i style="width:${(r.projWk / max * 100).toFixed(0)}%"></i><span>${f0(r.projWk)}</span></div></td>
+      <td class="num">${r.pfWk == null ? '–' : f0(r.pfWk)}</td>
+      <td class="num">${r.team.wins}-${r.team.losses}</td>
+      <td class="num ${move > 0 ? 'up' : move < 0 ? 'down' : 'muted'}" title="Power rank vs current standing">${move > 0 ? '▲' + move : move < 0 ? '▼' + -move : '–'}</td>
+      <td class="small muted">${nd.weak.length ? 'needs ' + nd.weak.slice(0, 2).map(needs.label).join(', ') : ''}</td></tr>`;
+  }).join('');
+  return `<section class="card"><h3>Power rankings <span class="r muted small">projected strength from here on, blended with results</span></h3>
+    <div class="scrollx"><table><thead><tr><th class="num">#</th><th>Team</th><th>Proj / week</th><th class="num" title="Actual points per matchup so far">PF / wk</th><th class="num">W-L</th><th class="num" title="Movement vs standings">±</th><th>Biggest need</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="muted small">Proj / week = each team's best daily lineups over the rest of the season with current rosters, injuries and NBA schedules. ▲ = better than their record says (buy-low trade partner or sleeping giant), ▼ = record flatters them.</p></section>`;
 }
 
 function getOdds() {
@@ -562,10 +694,129 @@ function getOdds() {
   return state.oddsCache.odds;
 }
 
+// ---- Trade tab
+const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}`;
+const tick = () => new Promise(r => setTimeout(r, 0));
+
+// Scans every other team for trade ideas, one team per tick so the popup stays responsive.
+async function runTradeScan(force = false) {
+  const key = scanKey();
+  if (!force && state.scan?.key === key) return;
+  const m = state.model, my = state.an.my, b = state.settings.basis;
+  const others = m.teams.filter(t => t.id !== my.id);
+  const scan = state.scan = { key, status: 'running', done: 0, total: others.length, ideas: [], targets: [] };
+  if (state.tab === 'trade') { state.keepScroll = true; render(); }
+  await tick();
+  // Screen on sampled days; refineIdeas re-checks the best ones on every day.
+  const ctx = A.seasonContext(m, b, 48);
+  const myBase = ctx.S(my.roster);
+  for (const t of others) {
+    const found = [];
+    for (const type of A.DEAL_TYPES) {
+      if (state.scan !== scan) return; // superseded (team switch, refresh…)
+      found.push(...A.tradeIdeasWith(m, my, t, b, ctx, myBase, [type]));
+      await tick();
+    }
+    scan.ideas.push(...A.keepBest(found));
+    scan.done++;
+    const bar = document.getElementById('scan-bar');
+    if (bar) bar.style.width = `${(scan.done / scan.total * 100).toFixed(0)}%`;
+  }
+  // Final phase in small steps (exact re-check, reasons, targets) so the popup never stalls.
+  scan.ideas = A.refineIdeas(m, my, scan.ideas, b);
+  await tick();
+  if (state.scan !== scan) return;
+  const full = { days: A.futureDays(m), scale: 1 };
+  for (const idea of scan.ideas.slice(0, 12)) idea.reason = A.tradeReason(m, my, idea, b, full);
+  await tick();
+  if (state.scan !== scan) return;
+  const big = getCtx();
+  scan.targets = A.tradeTargets(m, my, b, big, big.myBase, 6);
+  scan.status = 'done';
+  if (state.tab === 'trade' && state.scan === scan) { state.keepScroll = true; render(); }
+}
+
+function loadIntoAnalyzer(idea) {
+  state.trade = { partner: idea.partner.id, give: idea.give.map(p => p.id), get: idea.get.map(p => p.id) };
+}
+
+function vTradeIdeas() {
+  const { an } = state;
+  const sc = state.scan;
+  const needs = getNeeds();
+  const mine = needs.byTeam[an.my.id];
+  const label = id => needs.label(id);
+  const head = `<h3>Trade ideas <span class="r muted small">${sc?.status === 'done' ? `scanned ${sc.total} teams · rest of season + playoffs` : ''}
+    ${sc?.status === 'done' ? '<button class="link" data-act="rescan">Rescan</button>' : ''}</span></h3>`;
+  if (!sc || sc.status !== 'done') {
+    return `<section class="card">${head}<div class="scan"><div class="scanbar"><i id="scan-bar" style="width:${sc ? (sc.done / Math.max(1, sc.total) * 100).toFixed(0) : 0}%"></i></div>
+      <p class="muted small">Testing 1-for-1, 2-for-1 and 1-for-2 deals against every roster, with positions, schedules and injuries…</p></div></section>`;
+  }
+  // Top ideas, at most two per partner so the list covers the league.
+  const per = {}, ideas = [];
+  for (const x of sc.ideas) {
+    if ((per[x.partner.id] = (per[x.partner.id] || 0) + 1) > 2) continue;
+    ideas.push(x);
+    if (ideas.length >= 8) break;
+  }
+  if (!ideas.length) return `<section class="card">${head}<p class="muted">No trades found that clearly help you without hurting the other team. Your lineup may already be well balanced, or try the Season avg projection.</p></section>`;
+  const side = ps => ps.map(p => `<div class="tchip">${pCell(p)}<span class="num">${f1(val(p))}</span></div>`).join('');
+  const cards = ideas.map((x, i) => {
+    const r = x.reason;
+    const why = [];
+    if (r?.best) why.push(`${mine.weak.includes(r.best.id) ? 'Fixes your weak' : 'Stronger at'} ${label(r.best.id)} (${signed(r.best.d, 1)} pts/day)`);
+    if (r && Math.abs(r.starts) >= 2) why.push(`${signed(r.starts)} games started`);
+    if (x.drops.length) why.push(`you drop ${x.drops.map(p => esc(p.name)).join(', ')}`);
+    return `<div class="idea">
+      <div class="idea-top">
+        <span class="kind ${x.kind}">${x.kind === 'win-win' ? 'Win-win' : 'Fair on paper'}</span>
+        <span>with <button class="tlink" data-view="${x.partner.id}">${esc(x.partner.name)}</button></span>
+        <span class="spacer"></span>
+        <span class="g-me" title="Your projected points, rest of season + playoffs">${signed(x.myGain)} you</span>
+        <span class="g-them ${x.theirGain >= 0 ? 'up' : 'down'}" title="Their projected points, rest of season + playoffs">${signed(x.theirGain)} them</span>
+      </div>
+      <div class="idea-swap"><div><div class="rk-label">You give</div>${side(x.give)}</div><div class="arrowx">⇄</div><div><div class="rk-label">You get</div>${side(x.get)}</div></div>
+      <div class="idea-foot"><span class="muted small">${why.join(' · ') || 'Better lineup fit for your roster.'} · Proj/G ${f1(x.giveV)} for ${f1(x.getV)}</span>
+        <button class="btn mini" data-act="idea" data-i="${sc.ideas.indexOf(x)}">Open in analyzer</button></div>
+    </div>`;
+  }).join('');
+  return `<section class="card">${head}<div class="ideas">${cards}</div>
+    <p class="muted small">"Win-win" = both teams project to score more. "Fair on paper" = they get at least as much Proj/G and lose little in fit, so they may say yes. Gains are projected points over the rest of the regular season plus playoffs.</p></section>`;
+}
+
+function vNeeds() {
+  const { an } = state;
+  const needs = getNeeds();
+  const me = needs.byTeam[an.my.id];
+  const max = Math.max(1, ...needs.ids.map(id => Math.max(me.perSlot[id], needs.league[id])));
+  const bars = needs.ids.map(id => {
+    const mine = me.perSlot[id], lg = needs.league[id], d = me.diff[id];
+    const cls = me.weak.includes(id) ? 'weak' : me.strong.includes(id) ? 'strong' : '';
+    return `<div class="need ${cls}"><span class="nl">${needs.label(id)}${needs.count[id] > 1 ? `<small>×${needs.count[id]}</small>` : ''}</span>
+      <div class="nbar"><i style="width:${(mine / max * 100).toFixed(0)}%"></i><b style="left:${(lg / max * 100).toFixed(0)}%" title="League average ${f1(lg)}"></b></div>
+      <span class="nv">${f1(mine)} <small class="${d >= 0 ? 'up' : 'down'}">${signed(d, 1)}</small></span></div>`;
+  }).join('');
+  const chips = me.chips.slice(0, 4).map(c => `<div class="pick">${pCell(c.p)}<div class="meta">starts ${Math.round(c.startRate * 100)}%<br><small>of their games</small></div></div>`).join('');
+  return `<section class="card"><h3>Team needs <span class="r muted small">pts per lineup slot per day vs league (line)</span></h3>
+    <div class="needs">${bars}</div>
+    <p class="small" style="margin:10px 0 0">${me.weak.length ? `Weakest: <b>${me.weak.map(needs.label).join(', ')}</b>. ` : 'No big holes. '}${me.strong.length ? `Strongest: <b>${me.strong.map(needs.label).join(', ')}</b>.` : ''}</p>
+    ${chips ? `<div class="rk-label" style="margin-top:12px">Trade chips <span class="muted">(good players stuck on your bench)</span></div>${chips}` : ''}
+  </section>`;
+}
+
+function vTargets() {
+  const sc = state.scan;
+  if (!sc || sc.status !== 'done') return `<section class="card"><h3>Targets</h3><p class="muted small">Waiting for the league scan…</p></section>`;
+  const rows = sc.targets.map(x => `<div class="pick">${pCell(x.p)}<div class="meta"><button class="tlink small" data-view="${x.owner.id}">${esc(x.owner.name)}</button><br>${f1(val(x.p))}<small> proj/G</small></div>
+    <div class="gain">${signed(x.gain)}</div><button class="btn mini" data-act="target" data-id="${x.p.id}" data-owner="${x.owner.id}">Target</button></div>`).join('');
+  return `<section class="card"><h3>Targets <span class="r muted small">who'd add the most to your lineup, before what you give up</span></h3>${rows || '<p class="muted">Nobody on another roster beats your current lineup.</p>'}</section>`;
+}
+
 function vTrade() {
   const { an, model: m } = state;
   const b = state.settings.basis;
   const tr = state.trade;
+  if (state.scan?.key !== scanKey()) setTimeout(() => runTradeScan(), 0);
   const others = m.teams.filter(t => t.id !== an.my.id);
   if (!others.some(t => t.id === tr.partner)) { tr.partner = others[0]?.id ?? null; tr.get = []; }
   const partner = m.teams.find(t => t.id === tr.partner);
@@ -575,29 +826,34 @@ function vTrade() {
     const on = tr[side].includes(p.id);
     return `<label class="tp ${on ? 'on' : ''}"><input type="checkbox" data-trade="${side}" value="${p.id}" ${on ? 'checked' : ''}>${pCell(p)}<span class="num">${f1(val(p))}</span></label>`;
   }).join('');
-  let result = '<p class="muted">Pick players on both sides to see the impact.</p>';
+  let result = '<p class="muted">Pick players on both sides, or open one of the trade ideas above.</p>';
   if (give.length || get.length) {
     const a = A.tradeImpact(m, an.my, give, get, b);
     const z = partner ? A.tradeImpact(m, partner, get, give, b) : null;
-    const d = (x, y) => { const v = y - x; return `<span class="${v > 0.5 ? 'up' : v < -0.5 ? 'down' : 'muted'}">${v > 0 ? '+' : ''}${f0(v)}</span>`; };
+    const d = (x, y) => { const v = y - x; return `<span class="${v > 0.5 ? 'up' : v < -0.5 ? 'down' : 'muted'}">${signed(v)}</span>`; };
     const row = (label, k) => `<tr><td>${label}</td><td class="num">${d(a.before[k], a.after[k])}</td>${z ? `<td class="num">${d(z.before[k], z.after[k])}</td>` : ''}</tr>`;
     const verdict = (a.after.ros - a.before.ros) + (a.after.po - a.before.po);
+    const theirs2 = z ? (z.after.ros - z.before.ros) + (z.after.po - z.before.po) : 0;
     const drops = [...a.drops.map(p => `${esc(an.my.name)} drops ${esc(p.name)}`), ...(z ? z.drops.map(p => `${esc(partner.name)} drops ${esc(p.name)}`) : [])];
+    const vGive = give.reduce((s2, p) => s2 + val(p), 0), vGet = get.reduce((s2, p) => s2 + val(p), 0);
     result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
         ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${row('Fantasy playoffs', 'po')}
-        <tr class="sum"><td>Proj/G swapped</td><td class="num">${d(give.reduce((s2, p) => s2 + val(p), 0), get.reduce((s2, p) => s2 + val(p), 0))}</td>${z ? `<td class="num">${d(get.reduce((s2, p) => s2 + val(p), 0), give.reduce((s2, p) => s2 + val(p), 0))}</td>` : ''}</tr>
+        <tr class="sum"><td>Proj/G swapped</td><td class="num">${d(vGive, vGet)}</td>${z ? `<td class="num">${d(vGet, vGive)}</td>` : ''}</tr>
       </tbody></table>
-      <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${verdict > 0 ? '+' : ''}${f0(verdict)} projected points the rest of the way (season + playoffs).</p>
+      <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${signed(verdict)} projected points the rest of the way (season + playoffs).
+        ${z ? `<span class="muted">${esc(partner.name)}: ${signed(theirs2)}${verdict > 0 && theirs2 > 0 ? ' — good for both, easy sell.' : verdict > 0 && vGive >= vGet * 0.97 ? ' — looks fair to them on paper.' : ''}</span>` : ''}</p>
       ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}.</p>` : ''}`;
   }
   const bs = A.buySell(m, an.my.id, b);
   const bsRow = (x, act) => `<div class="pick">${pCell(x.p)}<div class="meta">${f1(x.p.stats.l15.avg)}<small> L15</small><br>${f1(x.p.stats.season.avg)}<small> season</small></div>
-    <div class="gain ${x.d < 0 ? 'down' : ''}">${x.d > 0 ? '+' : ''}${f1(x.d)}</div>${act ? `<button class="btn mini" data-act="target" data-id="${x.p.id}" data-owner="${x.owner.id}">Target</button>` : ''}</div>`;
-  return `<div class="grid2">
+    <div class="gain ${x.d < 0 ? 'down' : ''}">${signed(x.d, 1)}</div>${act ? `<button class="btn mini" data-act="target" data-id="${x.p.id}" data-owner="${x.owner.id}">Target</button>` : ''}</div>`;
+  return `${vTradeIdeas()}
+    <div class="grid2" id="analyzer">
       <section class="card"><h3>You give <span class="r">${esc(an.my.name)}</span></h3><div class="tlist">${pick(mine, 'give')}</div></section>
       <section class="card"><h3>You get <select class="tsel" data-act="partner">${others.map(t => `<option value="${t.id}" ${t.id === tr.partner ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></h3><div class="tlist">${pick(theirs, 'get')}</div></section>
     </div>
-    <section class="card"><h3>Trade impact <span class="r">${give.length || get.length ? '<button class="link" data-act="trade-clear">Clear</button>' : ''}</span></h3>${result}</section>
+    <section class="card"><h3>Trade analyzer <span class="r">${give.length || get.length ? '<button class="link" data-act="trade-clear">Clear</button>' : ''}</span></h3>${result}</section>
+    <div class="grid2">${vTargets()}${vNeeds()}</div>
     <div class="grid2">
       <section class="card"><h3>Buy low <span class="r muted small">other teams' players in a slump (last 15 vs season)</span></h3>${bs.buy.map(x => bsRow(x, true)).join('') || '<p class="muted">Shows up after ~2 weeks of games.</p>'}</section>
       <section class="card"><h3>Sell high <span class="r muted small">your players above their norm</span></h3>${bs.sell.map(x => bsRow(x, false)).join('') || '<p class="muted">Nobody on your roster is running hot right now.</p>'}</section>
@@ -664,11 +920,59 @@ function vMatchups() {
     </tr>`;
   }).join('');
 
-  return `<section class="card"><h3>Week ${m.currentPeriod} scoreboard <span class="r muted small">${A.periodRange(m, m.currentPeriod)} · live score + projected final</span></h3>
+  return `<section class="card"><h3>Week ${m.currentPeriod} scoreboard <span class="r muted small">${A.periodRange(m, m.currentPeriod)} · live score + projected final <button class="link" data-act="recap">Copy recap</button></span></h3>
       <div class="board-list">${live || '<p class="muted">No matchups this week.</p>'}</div></section>
+    ${vBreakdown()}
     <section class="card"><h3>${esc(an.my.name)} · schedule & predictions <span class="r muted small">projected record <b>${Math.round(projW)}-${Math.round(projL)}</b></span></h3>
       <div class="scrollx"><table><thead><tr><th>Week</th><th>Opponent</th><th class="num">Score / Proj</th><th class="num">Win %</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No schedule yet.</td></tr>'}</tbody></table></div>
       <p class="muted small">Future weeks are projected with each team's current roster and NBA schedule, using ${esc(A.BASIS[state.settings.basis])} values and this league's scoring.</p></section>`;
+}
+
+// Where a projection comes from: every player's projected starts and points for a week.
+function vBreakdown() {
+  const { an, model: m } = state;
+  const b = state.settings.basis;
+  const sched = A.teamSchedule(m, an.my.id, b);
+  const periods = sched.map(x => x.period);
+  if (!periods.length) return '';
+  let period = state.boardPeriod ?? m.currentPeriod;
+  if (!periods.includes(period)) period = periods.reduce((a, c) => (Math.abs(c - m.currentPeriod) < Math.abs(a - m.currentPeriod) ? c : a));
+  const i = periods.indexOf(period), g = sched[i];
+  const prev = periods[i - 1], next = periods[i + 1];
+  const nav = `<span class="wknav">
+      <button class="arrow" data-act="wk" data-p="${prev ?? ''}" ${prev == null ? 'disabled' : ''} aria-label="Previous week">‹</button>
+      <span>Week ${period}</span>
+      <button class="arrow" data-act="wk" data-p="${next ?? ''}" ${next == null ? 'disabled' : ''} aria-label="Next week">›</button></span>`;
+  const head = `<h3>Projection breakdown ${nav}<span class="r muted small">${A.periodRange(m, period)}${period === m.currentPeriod ? ' · remaining days only' : ''}</span></h3>`;
+  if (period < m.currentPeriod) return `<section class="card">${head}<p class="muted">Week ${period} is final: ${f0(g.myPts)}–${f0(g.oppPts)} ${g.won ? 'win' : g.tie ? 'tie' : 'loss'}.</p></section>`;
+  const side = (team, pts) => {
+    const bd = A.breakdown(m, team, period, b);
+    const rows = bd.rows.filter(r => r.avail || r.out || r.g).map(r => {
+      const notes = [];
+      if (r.bench) notes.push(`<span class="muted">sits ${r.bench}</span>`);
+      if (r.out) notes.push(`<span class="down" title="${esc(A.returnLabel(r.p))}">out ${r.out}</span>`);
+      return `<tr class="${r.g ? '' : 'dim'}"><td>${pCell(r.p)}</td><td class="num">${r.g}<small class="muted">/${r.avail + r.out}</small></td><td class="small">${notes.join(' · ')}</td><td class="num"><b>${f0(r.pts)}</b></td></tr>`;
+    }).join('');
+    const idle = bd.rows.filter(r => !r.avail && !r.out && !r.g).map(r => esc(r.p.name)).join(', ');
+    return `<div><div class="bd-head"><b>${esc(team.name)}</b><span>${pts ? `${f0(pts)} + ` : ''}<b>${f0(bd.total)}</b> = ${f0(pts + bd.total)}</span></div>
+      <table class="bd"><thead><tr><th>Player</th><th class="num" title="Projected games started / games on the schedule">Starts</th><th></th><th class="num">Pts</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No games left.</td></tr>'}</tbody></table>
+      ${idle ? `<p class="muted small">No games: ${idle}</p>` : ''}</div>`;
+  };
+  if (!g?.opp) return `<section class="card">${head}<p class="muted">Bye week.</p></section>`;
+  const live = period === m.currentPeriod;
+  return `<section class="card">${head}<div class="grid2 bdgrid">${side(an.my, live ? g.myPts : 0)}${side(g.opp, live ? g.oppPts : 0)}</div>
+    <p class="muted small">Starts = games each player is projected to start in the best daily lineup, out of games on their schedule. "Sits" = games lost to a full lineup; "out" = games missed while injured (counted only from ESPN's expected return date).</p></section>`;
+}
+
+function recapText() {
+  const m = state.model, b = state.settings.basis;
+  const lines = [`${m.name} · Week ${m.currentPeriod} (${A.periodRange(m, m.currentPeriod)})`];
+  for (const x of A.scoreboard(m, m.currentPeriod, b)) {
+    if (!x.away) { lines.push(`${x.home.name}: bye`); continue; }
+    lines.push(`${x.home.name} ${f0(x.homePts)} – ${f0(x.awayPts)} ${x.away.name}  (proj ${f0(x.homeProj)}–${f0(x.awayProj)}, ${pct(x.winProb)} / ${pct(1 - x.winProb)})`);
+  }
+  lines.push('— via LinedUpBetter');
+  return lines.join('\n');
 }
 
 function vWatchlist() {
@@ -690,6 +994,22 @@ function vWatchlist() {
   </section>`;
 }
 
+// How much a player is worth to the viewed team's lineup over the rest of the season.
+function vWorth(p, ownerId) {
+  const my = state.an.my;
+  const ctx = getCtx();
+  let pts, label;
+  if (ownerId === my.id) {
+    pts = ctx.myBase - ctx.S(my.roster.filter(x => x.id !== p.id));
+    label = `Worth to ${esc(my.name)}`;
+  } else {
+    pts = ctx.S(A.applyTrade(my.roster, [], [p], state.settings.basis).after) - ctx.myBase;
+    label = `Adds to ${esc(my.name)}`;
+  }
+  return `<div class="worth" title="Projected points over the rest of the season + playoffs, with ${ownerId === my.id ? 'vs without' : 'after adding (dropping your least useful player)'} this player">
+    <span>${label}</span><b class="${pts > 0 ? 'up' : 'muted'}">${signed(pts)}</b><small>pts rest of season</small></div>`;
+}
+
 function vDrawer() {
   const hit = state.index.get(state.openPlayer);
   if (!hit) return '';
@@ -708,7 +1028,9 @@ function vDrawer() {
     <div class="row">
       <button class="btn ${isStar(p.id) ? 'primary' : ''}" data-act="pstar">${isStar(p.id) ? '★ Starred' : '☆ Star player'}</button>
       ${ownerId == null ? `<button class="btn ${isHidden(p.id) ? 'warnbtn' : ''}" data-act="${isHidden(p.id) ? 'unhide' : 'hide'}" data-id="${p.id}">${isHidden(p.id) ? '↺ Unhide in waivers' : '✕ Hide from waivers'}</button>` : ''}
+      ${ownerId != null && ownerId !== state.an.my.id ? `<button class="btn" data-act="target" data-id="${p.id}" data-owner="${ownerId}">⇄ Trade for</button>` : ''}
     </div>
+    ${vWorth(p, ownerId)}
     <div class="facts">
       <div><span class="k">Avg</span><span class="v">${f1(avgOf(p))}</span></div><div><span class="k">Proj/G</span><span class="v">${f1(val(p))}</span></div>
       <div><span class="k">Games left</span><span class="v">${A.gamesIn(m, p, state.an.rem)}</span></div>
@@ -717,6 +1039,8 @@ function vDrawer() {
     <table><thead><tr><th>Split</th><th class="num">Avg FP</th><th class="num">GP</th></tr></thead><tbody>
       ${row('season', 'Season')}${row('l7', 'Last 7')}${row('l15', 'Last 15')}${row('l30', 'Last 30')}${row('proj', 'ESPN projection')}${row('prev', 'Last season')}
     </tbody></table>
+    <div class="rk-label">Latest news</div>
+    <div class="newsbox" data-news="${p.id}" data-mode="full">${newsHtml(p.id, 'full')}</div>
     <label class="rk-label" for="pnote">Your notes</label>
     <textarea id="pnote" data-act="pnote" rows="5" placeholder="e.g. buy-low target, minutes up since trade, ask about in trades…">${esc(noteOf(p.id))}</textarea>
     <p class="muted small">Saved automatically, only in this browser.</p>
@@ -759,7 +1083,8 @@ function vSettings() {
         <li>Season is the year the NBA season ends (2026-27 → <code>2027</code>).</li>
         <li>Private league? Just be signed in at fantasy.espn.com. LinedUpBetter loads your league through an ESPN tab (it opens one in the background if needed), so your login just works.</li>
         <li>Your team is auto-detected from your ESPN login. Pick another above, or use ☆ next to the team switcher to star any team as your main one.</li>
-        <li>Data is cached for 3 minutes. Hit ↻ to force a refresh.</li>
+        <li>Data is cached for 3 minutes. Hit ↻ (or press R) to force a refresh.</li>
+        <li>Shortcuts: <code>1</code>–<code>9</code> switch tabs, <code>←</code> <code>→</code> step through weeks, <code>Esc</code> closes the player panel.</li>
       </ol></section>
     ${state.error ? `<section class="card err"><h3>Last error</h3><p>${esc(state.error)}</p></section>` : ''}`;
 }
@@ -782,6 +1107,7 @@ function render() {
   app.innerHTML = vHeader() + `<main>${body}</main>` + drawer;
   if (state.keepScroll) document.querySelector('main').scrollTop = scroll;
   state.keepScroll = false;
+  if (state.model && state.openPlayer != null) ensureNews(state.openPlayer);
 }
 
 // ---------- events
@@ -791,7 +1117,7 @@ document.addEventListener('click', async e => {
   if (t.matches('select, textarea, input')) return;
   if (t.dataset.player) { state.openPlayer = +t.dataset.player; state.keepScroll = true; render(); return; }
   if (t.dataset.view) { setView(+t.dataset.view); return; }
-  if (t.dataset.tab) { state.tab = t.dataset.tab; render(); return; }
+  if (t.dataset.tab) { setTab(t.dataset.tab); return; }
   if (t.dataset.day) { const d = +t.dataset.day; state.wv.day = state.wv.day === d ? null : d; state.keepScroll = true; render(); return; }
   if (t.dataset.pos) { state.wv.pos = t.dataset.pos; state.keepScroll = true; render(); return; }
   if (t.dataset.sort) { state.wv.sort = t.dataset.sort; state.keepScroll = true; render(); return; }
@@ -826,7 +1152,17 @@ document.addEventListener('click', async e => {
     const owner = +t.dataset.owner, id = +t.dataset.id;
     if (state.trade.partner !== owner) { state.trade.partner = owner; state.trade.get = []; }
     if (!state.trade.get.includes(id)) state.trade.get.push(id);
-    document.querySelector('main').scrollTop = 0; render(); return;
+    state.openPlayer = null; setTab('trade'); scrollToAnalyzer(); return;
+  }
+  if (act === 'idea') {
+    const idea = state.scan?.ideas[+t.dataset.i];
+    if (idea) { loadIntoAnalyzer(idea); render(); scrollToAnalyzer(); }
+    return;
+  }
+  if (act === 'rescan') { runTradeScan(true); return; }
+  if (act === 'recap') {
+    navigator.clipboard.writeText(recapText()).then(() => toast('Recap copied: paste it in your group chat'), () => toast('Couldn\'t copy. Try again.'));
+    return;
   }
   if (act === 'refresh') load(true);
   if (act === 'signin') chrome.tabs.create({ url: 'https://www.espn.com/login' });
@@ -849,6 +1185,16 @@ document.addEventListener('click', async e => {
     load(true);
   }
 });
+function setTab(tab) {
+  state.tab = tab;
+  if (tab !== 'settings' && state.settings.lastTab !== tab) { state.settings.lastTab = tab; saveSettings(); }
+  render();
+  document.querySelector('main')?.scrollTo(0, 0);
+}
+function scrollToAnalyzer() {
+  const el = document.getElementById('analyzer');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
 function setView(id) {
   if (id == null || !state.model?.teams.some(t => t.id === id)) return;
   state.viewId = id; state.openPlayer = null; state.trade.give = []; state.boardPeriod = null;
@@ -862,8 +1208,16 @@ document.addEventListener('input', e => {
   clearTimeout(noteTimer);
   noteTimer = setTimeout(savePNotes, 300);
 });
+// Shortcuts: 1–9 switch tabs, ←/→ step weeks, R refreshes, Esc closes the player panel.
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && state.openPlayer != null) { state.openPlayer = null; state.keepScroll = true; render(); }
+  if (e.key === 'Escape' && state.openPlayer != null) { state.openPlayer = null; state.keepScroll = true; render(); return; }
+  if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input, textarea, select')) return;
+  if (/^[1-9]$/.test(e.key) && TABS[+e.key - 1]) { setTab(TABS[+e.key - 1][0]); return; }
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    document.querySelector(`.arrow[aria-label="${e.key === 'ArrowLeft' ? 'Previous' : 'Next'} week"]:not([disabled])`)?.click();
+    return;
+  }
+  if (e.key === 'r' || e.key === 'R') load(true);
 });
 document.addEventListener('change', async e => {
   const act = e.target.dataset.act;
@@ -882,6 +1236,7 @@ document.addEventListener('change', async e => {
 // ---------- boot
 (async () => {
   Object.assign(state.settings, (await store.get('settings')) || {});
+  if (TABS.some(([k]) => k === state.settings.lastTab) && state.settings.lastTab !== 'settings') state.tab = state.settings.lastTab;
   state.signedIn = await checkSignedIn();
   const fromTab = await detectFromTab();
   if (fromTab && fromTab.leagueId !== state.settings.leagueId) {

@@ -57,6 +57,21 @@ async function getJSON(url, filter) {
   }
 }
 
+// Recent fantasy news for one player from ESPN's public news feed (no login needed).
+// RotoWire fantasy blurbs come first; video clips and articles fill in after.
+export async function fetchPlayerNews(playerId, limit = 4) {
+  const res = await fetch(`https://site.api.espn.com/apis/fantasy/v2/games/fba/news/players?days=30&limit=15&playerId=${playerId}`);
+  if (!res.ok) throw new Error(`News unavailable (${res.status})`);
+  const data = await res.json();
+  // DOMParser never runs scripts or loads images, so stripping markup this way is safe.
+  const text = html => new DOMParser().parseFromString(String(html || ''), 'text/html').body.textContent.replace(/\s+/g, ' ').trim();
+  const items = (data.feed || []).map(x => ({
+    id: x.id, type: x.type, headline: text(x.headline), story: text(x.story || x.description),
+    published: x.published || x.lastModified || null, link: x.links?.web?.href || null,
+  }));
+  return [...items.filter(x => x.type === 'Rotowire'), ...items.filter(x => x.type !== 'Rotowire')].slice(0, limit);
+}
+
 export async function loadLeague({ leagueId, season }) {
   season = +season;
   const leagueUrl = `${BASE}/${season}/segments/0/leagues/${leagueId}`;
@@ -336,6 +351,7 @@ function normPlayer(p, { slot = null, status = null, season, pts }) {
     slots: (p.eligibleSlots || []).filter(x => x < 12),
     injury: p.injuryStatus || (p.injured ? 'OUT' : 'ACTIVE'),
     owned: p.ownership?.percentOwned ?? null,
+    newsAt: p.lastNewsDate || null,
     ownedChange: p.ownership?.percentChange ?? null,
     slot,
     status,
