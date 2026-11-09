@@ -48,11 +48,15 @@ const teamName = id => state.model.teams.find(t => t.id === id)?.name || `Team $
 const leagueKey = () => (state.settings.demo ? 'demo' : `${state.settings.leagueId}:${state.settings.season}`);
 const starredTeam = () => state.settings.starred?.[leagueKey()] ?? null;
 const isStar = id => !!state.pnotes[id]?.star;
-const isHidden = id => !!state.pnotes[id]?.hidden;
+// Banned = never suggested for you to acquire, anywhere (waivers, streaming, trade
+// fill-ins, trade ideas, the finder, targets). Formerly "hidden" (waivers only).
+const isBanned = id => !!state.pnotes[id]?.ban;
+const bannedSet = () => new Set(Object.keys(state.pnotes).filter(id => state.pnotes[id].ban).map(Number));
 const isLocked = id => !!state.pnotes[id]?.lock;
-const xBtn = id => `<button class="xbtn" data-act="hide" data-id="${id}" title="Hide from waivers" aria-label="Hide from waivers">✕</button>`;
+const xBtn = id => `<button class="xbtn" data-act="ban" data-id="${id}" title="Never suggest this player (waivers, trades, everything)" aria-label="Never suggest this player">✕</button>`;
 const noteOf = id => state.pnotes[id]?.note || '';
-const savePNotes = () => store.set(`pnotes:${leagueKey()}`, state.pnotes);
+// Bumped on every star / note / lock / ban change so cached results recompute.
+const savePNotes = () => { state.pv = (state.pv || 0) + 1; return store.set(`pnotes:${leagueKey()}`, state.pnotes); };
 const pct = x => (Number.isFinite(x) ? `${Math.min(99, Math.max(1, Math.round(x * 100)))}%` : '–');
 const STAR = '<span class="star" title="Starred">★</span>';
 const FRESH_NEWS_MS = 24 * 3600e3;
@@ -74,7 +78,7 @@ function toast(text) {
 // Memoize expensive season-long calculations until the data, projection basis or
 // viewed team changes.
 function memo(name, fn) {
-  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${Object.keys(state.pnotes).length}`;
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${state.pv || 0}`;
   const hit = state.calc[name];
   if (hit?.key === key) return hit.v;
   const v = fn();
@@ -95,7 +99,7 @@ function badge(p) {
 }
 function pCell(p, extra = '') {
   const pos = p.eligible?.length ? p.eligible.join('/') : p.pos;
-  const marks = (isStar(p.id) ? STAR : '') + (isLocked(p.id) ? '<span class="lockmark" title="Untouchable: never offered in trades">🔒</span>' : '') + (noteOf(p.id) ? '<span class="has-note" title="Has notes">✎</span>' : '');
+  const marks = (isStar(p.id) ? STAR : '') + (isLocked(p.id) ? '<span class="lockmark" title="Untouchable: never offered in trades">🔒</span>' : '') + (isBanned(p.id) ? '<span class="lockmark" title="Never suggested to you">🚫</span>' : '') + (noteOf(p.id) ? '<span class="has-note" title="Has notes">✎</span>' : '');
   const news = hasFreshNews(p) ? `<span class="newsdot" title="News ${ago(p.newsAt)}: open for details"></span>` : '';
   return `<div class="pl"><span class="pn" data-player="${p.id}" title="Notes, news & details">${esc(p.name)}${marks}${news}${badge(p)}${extra}</span><span class="pm">${esc(abbr(p))} · ${esc(pos)}</span></div>`;
 }
@@ -241,6 +245,10 @@ async function load(force = false) {
     if (!has(state.viewId) || state.loadedKey !== leagueKey()) state.viewId = +tid;
     state.loadedKey = leagueKey();
     state.pnotes = (await store.get(`pnotes:${leagueKey()}`)) || {};
+    // Players hidden from waivers in older versions become banned (never suggested).
+    let migrated = false;
+    for (const [id, n] of Object.entries(state.pnotes)) if (n.hidden) { state.pnotes[id] = { ...n, ban: true }; delete state.pnotes[id].hidden; migrated = true; }
+    if (migrated) await savePNotes();
     state.model = model;
     reanalyze();
     if (state.tab === 'settings' && !state.stayOnSettings) state.tab = 'overview';
@@ -261,7 +269,8 @@ function reanalyze() {
   A.setAdjustments({ usage: adjustOn(), rest: adjustOn() });
   // Players you've X'd out never show up in waiver suggestions, streaming plans or stash
   // lists (but still count as teammates for usage and as trade fill-ins).
-  state.an = A.analyze({ ...m, freeAgents: m.freeAgents.filter(p => !isHidden(p.id)), poolFAs: m.freeAgents }, state.settings.basis);
+  m.banned = bannedSet();
+  state.an = A.analyze({ ...m, freeAgents: m.freeAgents.filter(p => !m.banned.has(p.id)), poolFAs: m.freeAgents }, state.settings.basis);
   state.index = new Map();
   for (const t of m.teams) for (const p of t.roster) state.index.set(p.id, { p, ownerId: t.id });
   for (const p of m.freeAgents) if (!state.index.has(p.id)) state.index.set(p.id, { p, ownerId: null });
@@ -561,17 +570,18 @@ function vWaivers() {
         }).join('')}<th></th>
       </tr></thead><tbody>${rows || `<tr><td colspan="${12 + sps.length}" class="muted">No players match.</td></tr>`}</tbody>
     </table></div>
-    <p class="muted small">Avg = real season average (same as ESPN). Proj/G = what projections use, blending the average with ESPN's projection early in the season. Wk +FP / ROS + = projected points gained this matchup / rest of season if they replace your drop candidate. UPGRADE = better Proj/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = hide a player you don't want. Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
+    <p class="muted small">Avg = real season average (same as ESPN). Proj/G = what projections use, blending the average with ESPN's projection early in the season. Wk +FP / ROS + = projected points gained this matchup / rest of season if they replace your drop candidate. UPGRADE = better Proj/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = never suggest this player anywhere (waivers, trade fill-ins, trade ideas). Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
     ${vHidden()}
   </section>`;
 }
 
 function vHidden() {
-  const hidden = state.model.freeAgents.filter(p => isHidden(p.id));
-  if (!hidden.length) return '';
-  return `<details class="hidden-list" ${state.showHidden ? 'open' : ''}><summary data-act="toggle-hidden">Hidden players (${hidden.length})</summary>
-    <div class="chips">${hidden.map(p => `<button class="chip unhide" data-act="unhide" data-id="${p.id}" title="Show in waivers again">${esc(p.name)} <span>↺</span></button>`).join('')}
-    <button class="link" data-act="unhide-all">Unhide all</button></div></details>`;
+  const list = [...bannedSet()].map(id => state.index.get(id)).filter(Boolean).map(x => x.p);
+  if (!list.length) return '';
+  return `<details class="hidden-list" ${state.showHidden ? 'open' : ''}><summary data-act="toggle-hidden">Never suggested (${list.length})</summary>
+    <p class="muted small" style="margin:8px 0 0">Not offered as a pickup, a trade fill-in, or in trade ideas and the finder. Click to allow again.</p>
+    <div class="chips">${list.map(p => `<button class="chip unhide" data-act="unban" data-id="${p.id}" title="Allow again">${esc(p.name)} <span>↺</span></button>`).join('')}
+    <button class="link" data-act="unban-all">Allow all</button></div></details>`;
 }
 
 function vLineupCard() {
@@ -699,7 +709,7 @@ function getOdds() {
 }
 
 // ---- Trade tab
-const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${state.an.my.roster.filter(p => isLocked(p.id)).map(p => p.id).join(',')}`;
+const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${state.pv || 0}`;
 // Yield to the browser between chunks of work. MessageChannel isn't throttled in
 // background tabs the way setTimeout is, so long scans keep moving in a full-tab view.
 const yieldChannel = new MessageChannel();
@@ -890,7 +900,7 @@ function vFinder() {
   let picker;
   if (f.mode === 'get') {
     const groups = m.teams.filter(t => t.id !== an.my.id).map(t => `<optgroup label="${esc(t.name)}">${t.roster.slice().sort((a, b) => val(b) - val(a))
-      .map(p => `<option value="${p.id}" ${f.arg === p.id ? 'selected' : ''}>${esc(p.name)} · ${f1(val(p))} proj/G · TV ${tv(p)}</option>`).join('')}</optgroup>`).join('');
+      .map(p => `<option value="${p.id}" ${f.arg === p.id ? 'selected' : ''} ${isBanned(p.id) ? 'disabled' : ''}>${isBanned(p.id) ? '🚫 ' : ''}${esc(p.name)} · ${f1(val(p))} proj/G · TV ${tv(p)}</option>`).join('')}</optgroup>`).join('');
     picker = `<select class="fsel" data-act="farg"><option value="">Pick a player you want…</option>${groups}</select>`;
   } else if (f.mode === 'away') {
     picker = `<select class="fsel" data-act="farg"><option value="">Pick one of your players to move…</option>${an.my.roster.slice().sort((a, b) => val(b) - val(a))
@@ -999,8 +1009,8 @@ function vTrade() {
   }).join('');
   let result = '<p class="muted">Pick players on both sides, or open one of the trade ideas above.</p>';
   if (give.length || get.length) {
-    const a = A.tradeImpact(m, an.my, give, get, b);
-    const z = partner ? A.tradeImpact(m, partner, get, give, b) : null;
+    const a = A.tradeImpact(m, an.my, give, get, b, true);
+    const z = partner ? A.tradeImpact(m, partner, get, give, b, false) : null;
     const d = (x, y) => { const v = y - x; return `<span class="${v > 0.5 ? 'up' : v < -0.5 ? 'down' : 'muted'}">${signed(v)}</span>`; };
     // Trade value excludes any free agent a team picks up (it could add them anyway).
     const net = (r, k) => r.after[k] - r.before[k] - r.fa[k];
@@ -1241,7 +1251,7 @@ function vDrawer() {
     </div>
     <div class="row">
       <button class="btn ${isStar(p.id) ? 'primary' : ''}" data-act="pstar">${isStar(p.id) ? '★ Starred' : '☆ Star player'}</button>
-      ${ownerId == null ? `<button class="btn ${isHidden(p.id) ? 'warnbtn' : ''}" data-act="${isHidden(p.id) ? 'unhide' : 'hide'}" data-id="${p.id}">${isHidden(p.id) ? '↺ Unhide in waivers' : '✕ Hide from waivers'}</button>` : ''}
+      ${ownerId !== state.an.my.id ? `<button class="btn ${isBanned(p.id) ? 'warnbtn' : ''}" data-act="${isBanned(p.id) ? 'unban' : 'ban'}" data-id="${p.id}" title="Never suggest as a pickup, trade fill-in or trade target">${isBanned(p.id) ? '↺ Allow again' : '🚫 Never suggest'}</button>` : ''}
       ${ownerId != null && ownerId !== state.an.my.id ? `<button class="btn" data-act="target" data-id="${p.id}" data-owner="${ownerId}">⇄ Find trades for</button>` : ''}
       ${ownerId === state.an.my.id ? `<button class="btn ${isLocked(p.id) ? 'warnbtn' : ''}" data-act="plock" title="Untouchable players are never offered in trade ideas or the finder">${isLocked(p.id) ? '🔒 Untouchable' : '🔓 Mark untouchable'}</button>
         <button class="btn" data-act="faway" data-id="${p.id}">⇄ Shop this player</button>` : ''}
@@ -1347,13 +1357,15 @@ document.addEventListener('click', async e => {
   if (t.dataset.sort) { state.wv.sort = t.dataset.sort; state.keepScroll = true; render(); return; }
   const act = t.dataset.act;
   if (act === 'close') { state.openPlayer = null; state.keepScroll = true; render(); return; }
-  if (act === 'hide' || act === 'unhide') {
+  if (act === 'ban' || act === 'unban') {
     const id = +t.dataset.id;
-    state.pnotes[id] = { ...state.pnotes[id], hidden: act === 'hide' };
-    await savePNotes(); reanalyze(); state.keepScroll = true; render(); return;
+    state.pnotes[id] = { ...state.pnotes[id], ban: act === 'ban' };
+    await savePNotes(); reanalyze(); state.keepScroll = true; render();
+    toast(act === 'ban' ? `${state.index.get(id)?.p.name || 'Player'} won't be suggested anywhere` : 'Allowed again');
+    return;
   }
-  if (act === 'unhide-all') {
-    for (const id of Object.keys(state.pnotes)) if (state.pnotes[id].hidden) state.pnotes[id] = { ...state.pnotes[id], hidden: false };
+  if (act === 'unban-all') {
+    for (const id of Object.keys(state.pnotes)) if (state.pnotes[id].ban) state.pnotes[id] = { ...state.pnotes[id], ban: false };
     await savePNotes(); reanalyze(); state.keepScroll = true; render(); return;
   }
   if (act === 'toggle-hidden') { e.preventDefault(); state.showHidden = !state.showHidden; state.keepScroll = true; render(); return; }

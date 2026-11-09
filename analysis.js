@@ -470,9 +470,10 @@ export function seasonWindows(m) {
 // Roster after a trade. Incoming players arrive on the bench; if the team now has more
 // players than before, it drops its least useful ones (out-for-season first, then
 // lowest value), never a player it just received.
-// With `fill` ({ fas, S? }), a team left with an open spot (gave more than it got)
-// picks up the best available free agent: the highest Proj/G, or, if a scorer S is
-// given, whichever of the top six fits its lineup best.
+// With `fill` ({ fas, S?, k?, exclude? }), a team left with an open spot (gave more than
+// it got) picks up its best waiver option: fill.fas is that team's free agents ranked by
+// how much each adds to its lineup (rankFillins); with a scorer S, the top k are
+// re-checked on the actual post-trade roster and the best fit wins.
 export function applyTrade(roster, give, get, basis, fill = null) {
   const giveIds = new Set(give.map(p => p.id)), getIds = new Set(get.map(p => p.id));
   let after = [...roster.filter(p => !giveIds.has(p.id)), ...get.map(p => ({ ...p, slot: 12 }))];
@@ -487,10 +488,10 @@ export function applyTrade(roster, give, get, basis, fill = null) {
   if (fill && after.length < roster.length) {
     // fill.fas is already sorted best-first and limited to players who can play.
     const owned = new Set(after.map(p => p.id));
-    const want = fill.S ? 6 : roster.length - after.length;
+    const want = fill.S ? (fill.k || 4) : roster.length - after.length;
     const pool = [];
     for (const p of fill.fas || []) {
-      if (owned.has(p.id) || giveIds.has(p.id)) continue;
+      if (owned.has(p.id) || giveIds.has(p.id) || fill.exclude?.has(p.id)) continue;
       pool.push(p);
       if (pool.length >= want) break;
     }
@@ -522,6 +523,29 @@ function faPool(m, basis) {
   return list;
 }
 
+// A team's waiver options ranked by what each would add to its lineup (positions, NBA
+// schedule, injuries), checked across the 60 best free agents by Proj/G. This is the
+// "best possible waiver pickup" used whenever a trade leaves a team a player short.
+export function rankFillins(m, team, basis, S, exclude = null) {
+  const base = S(team.roster);
+  return faPool(m, basis).filter(p => !exclude?.has(p.id)).slice(0, 60)
+    .map(fa => ({ fa, gain: S(applyTrade(team.roster, [], [fa], basis).after) - base }))
+    .sort((a, b) => b.gain - a.gain).map(x => x.fa);
+}
+// Fill-in settings per team, ranked once per context. Players you've banned are never
+// your pickup (other teams can still add them).
+function makeFills(m, my, basis, S, exact) {
+  const cache = new Map();
+  return team => {
+    if (!cache.has(team.id)) {
+      const exclude = team.id === my.id ? m.banned || null : null;
+      cache.set(team.id, { fas: rankFillins(m, team, basis, S, exclude), S: exact ? S : null, k: 4, exclude });
+    }
+    return cache.get(team.id);
+  };
+}
+const banned = m => m.banned || new Set();
+
 // What the free agents a trade lets a team pick up would be worth on their own (added by
 // dropping its least useful players instead of trading). Taken out of a trade's value,
 // so a 2-for-1 isn't credited for a waiver move the team could make anyway.
@@ -538,11 +562,13 @@ function faAloneMemo(memo, team, adds, basis, S, base) {
 }
 
 // Projected points for a team before/after a trade, in each window.
-export function tradeImpact(m, team, give, get, basis) {
+export function tradeImpact(m, team, give, get, basis, mine = true) {
   const before = team.roster;
   // Pick any free-agent fill-in on every remaining day, exactly like the trade ideas do.
   const days = futureDays(m);
-  const { after, drops, adds } = applyTrade(before, give, get, basis, { fas: faPool(m, basis), S: r => projectDays(m, r, days, basis).total });
+  const S = r => projectDays(m, r, days, basis).total;
+  const exclude = mine ? m.banned || null : null;
+  const { after, drops, adds } = applyTrade(before, give, get, basis, { fas: rankFillins(m, team, basis, S, exclude), S, k: 4, exclude });
   const w = seasonWindows(m);
   const calc = r => ({
     week: projectDays(m, r, w.week, basis).total,
@@ -569,7 +595,7 @@ export function buySell(m, teamId, basis) {
   };
   const rows = m.teams.flatMap(t => t.roster.map(p => ({ p, owner: t, d: form(p), v: value(p, basis) }))).filter(x => x.d != null);
   return {
-    buy: rows.filter(x => x.owner.id !== teamId && x.d < -2 && x.p.stats.season.avg >= 20).sort((a, b) => a.d - b.d).slice(0, 8),
+    buy: rows.filter(x => x.owner.id !== teamId && x.d < -2 && x.p.stats.season.avg >= 20 && !banned(m).has(x.p.id)).sort((a, b) => a.d - b.d).slice(0, 8),
     sell: rows.filter(x => x.owner.id === teamId && x.d > 2).sort((a, b) => b.d - a.d).slice(0, 6),
   };
 }
@@ -820,21 +846,21 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
   const v = p => value(p, basis);
   const theirBase = ctx.S(other.roster);
   const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 11);
-  const mine = pieces(my).filter(p => !locked.has(p.id)), theirs = pieces(other);
+  const mine = pieces(my).filter(p => !locked.has(p.id)), theirs = pieces(other).filter(p => !banned(m).has(p.id));
   const sum = ps => ps.reduce((a, p) => a + v(p), 0);
   // "On paper" = trade value (name + form, see marketParts). In uneven deals the side
   // that ends up a player short is credited with the best free agent it can add, plus a
   // mild star premium (one 45 FP/G player still edges a 30 + 15: lineup spots are limited).
   const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
-  const fill = { fas: faPool(m, basis) };
+  const fillOf = ctx.fillOf || (ctx.fillOf = makeFills(m, my, basis, ctx.S, false));
   const faMemo = ctx.faMemo || (ctx.faMemo = new Map());
   const out = [];
   const consider = (give, get) => {
-    const a = applyTrade(my.roster, give, get, basis, fill);
+    const a = applyTrade(my.roster, give, get, basis, fillOf(my));
     // Screening on sampled days is loose on purpose; refineIdeas re-checks exactly.
     const myGain = ctx.S(a.after) - myBase - faAloneMemo(faMemo, my, a.adds, basis, ctx.S, myBase);
     if (myGain < 0) return;
-    const z = applyTrade(other.roster, get, give, basis, fill);
+    const z = applyTrade(other.roster, get, give, basis, fillOf(other));
     const theirGain = ctx.S(z.after) - theirBase - faAloneMemo(faMemo, other, z.adds, basis, ctx.S, theirBase);
     const giveV = sum(give), getV = sum(get);
     const paperGive = paper([...give, ...z.adds]), paperGet = paper([...get, ...a.adds]);
@@ -923,14 +949,14 @@ function rateIdea(myGain, theirGain, giveV, getV) {
 export function dealEvaluator(m, my, basis, S, exact = false) {
   const base = new Map();
   const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster)); return base.get(t.id); };
-  const fill = exact ? { fas: faPool(m, basis), S } : { fas: faPool(m, basis) };
+  const fillOf = makeFills(m, my, basis, S, exact);
   const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
   const mkt = ps => ps.reduce((a, p) => a + marketValue(m, p, basis), 0);
   const sum = ps => ps.reduce((a, p) => a + value(p, basis), 0);
   const faMemo = new Map();
   return (give, get, partner) => {
-    const a = applyTrade(my.roster, give, get, basis, fill);
-    const z = applyTrade(partner.roster, get, give, basis, fill);
+    const a = applyTrade(my.roster, give, get, basis, fillOf(my));
+    const z = applyTrade(partner.roster, get, give, basis, fillOf(partner));
     return {
       partner, give, get, type: `${give.length}for${get.length}`,
       myGain: S(a.after) - baseOf(my) - faAloneMemo(faMemo, my, a.adds, basis, S, baseOf(my)),
@@ -969,6 +995,7 @@ export function acceptance(d) {
 export function finderCandidates(m, my, basis, mode, arg, locked = new Set()) {
   const v = p => value(p, basis), mv = p => marketValue(m, p, basis);
   const usable = p => !p.outForSeason && v(p) >= 5;
+  const wanted = p => usable(p) && !banned(m).has(p.id); // players you'd receive
   const mine = my.roster.filter(p => usable(p) && !locked.has(p.id)).sort((a, b) => mv(b) - mv(a));
   const pairs = list => list.flatMap((a, i) => list.slice(i + 1).map(b => [a, b]));
   const mk = ps => ps.reduce((a, p) => a + mv(p), 0);
@@ -980,8 +1007,8 @@ export function finderCandidates(m, my, basis, mode, arg, locked = new Set()) {
   if (mode === 'get') {
     const partner = m.teams.find(t => t.roster.some(p => p.id === arg));
     const target = partner?.roster.find(p => p.id === arg);
-    if (!target || partner.id === my.id) return [];
-    const fillers = partner.roster.filter(p => p !== target && usable(p)).sort((a, b) => v(b) - v(a)).slice(0, 8);
+    if (!target || partner.id === my.id || banned(m).has(target.id)) return [];
+    const fillers = partner.roster.filter(p => p !== target && wanted(p)).sort((a, b) => v(b) - v(a)).slice(0, 8);
     for (const g of gives) {
       add(g, [target], partner);
       for (const f of fillers) add(g, [target, f], partner);
@@ -993,13 +1020,13 @@ export function finderCandidates(m, my, basis, mode, arg, locked = new Set()) {
     const myGives = [[me], ...sweeteners.map(f => [me, f])];
     for (const t of m.teams) {
       if (t.id === my.id) continue;
-      const theirs = t.roster.filter(usable).sort((a, b) => v(b) - v(a));
+      const theirs = t.roster.filter(wanted).sort((a, b) => v(b) - v(a));
       const gets = [...theirs.slice(0, 10).map(p => [p]), ...pairs(theirs.slice(0, 7))];
       for (const g of myGives) for (const x of gets) add(g, x, t);
     }
   } else if (mode === 'need') {
     const targets = m.teams.filter(t => t.id !== my.id)
-      .flatMap(t => t.roster.filter(p => usable(p) && (p.eligible || []).includes(arg)).map(p => ({ p, t })))
+      .flatMap(t => t.roster.filter(p => wanted(p) && (p.eligible || []).includes(arg)).map(p => ({ p, t })))
       .sort((a, b) => v(b.p) - v(a.p)).slice(0, 12);
     for (const { p, t } of targets) for (const g of [...mine.map(q => [q]), ...pairs(mine.slice(0, 8))]) add(g, [p], t);
   }
@@ -1029,7 +1056,7 @@ export function tradeReason(m, my, idea, basis, ctx) {
 export function tradeTargets(m, my, basis, ctx, myBase, limit = 10) {
   const v = p => value(p, basis);
   return m.teams.filter(t => t.id !== my.id)
-    .flatMap(t => t.roster.filter(p => !p.outForSeason).map(p => ({ p, owner: t })))
+    .flatMap(t => t.roster.filter(p => !p.outForSeason && !banned(m).has(p.id)).map(p => ({ p, owner: t })))
     .sort((a, b) => v(b.p) - v(a.p)).slice(0, 60)
     .map(x => ({ ...x, gain: ctx.S(applyTrade(my.roster, [], [x.p], basis).after) - myBase }))
     .filter(x => x.gain > 0)
