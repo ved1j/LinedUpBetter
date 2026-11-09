@@ -704,7 +704,8 @@ async function runTradeScan(force = false) {
   if (!force && state.scan?.key === key) return;
   const m = state.model, my = state.an.my, b = state.settings.basis;
   const others = m.teams.filter(t => t.id !== my.id);
-  const scan = state.scan = { key, status: 'running', done: 0, total: others.length, ideas: [], targets: [] };
+  const scan = state.scan = { key, status: 'running', done: 0, total: others.length, ideas: [], targets: [], frac: 0 };
+  state.ideaView = { kind: 'all', type: 'all', partner: 'all', limit: 10 };
   if (state.tab === 'trade') { state.keepScroll = true; render(); }
   await tick();
   // Screen on sampled days; refineIdeas re-checks the best ones on every day.
@@ -717,17 +718,21 @@ async function runTradeScan(force = false) {
       found.push(...A.tradeIdeasWith(m, my, t, b, ctx, myBase, [type]));
       await tick();
     }
-    scan.ideas.push(...A.keepBest(found));
+    scan.ideas.push(...found);
     scan.done++;
-    const bar = document.getElementById('scan-bar');
-    if (bar) bar.style.width = `${(scan.done / scan.total * 100).toFixed(0)}%`;
+    scanProgress(scan, 0.8 * scan.done / scan.total, `Scanned ${scan.done} of ${scan.total} teams…`);
   }
-  // Final phase in small steps (exact re-check, reasons, targets) so the popup never stalls.
-  scan.ideas = A.refineIdeas(m, my, scan.ideas, b);
-  await tick();
-  if (state.scan !== scan) return;
-  const full = { days: A.futureDays(m), scale: 1 };
-  for (const idea of scan.ideas.slice(0, 12)) idea.reason = A.tradeReason(m, my, idea, b, full);
+  // Exact re-check of every screened idea (up to 120), a few at a time so the popup never stalls.
+  const refine = A.makeRefiner(m, my, b);
+  const queue = scan.ideas.sort((x, y) => y.score - x.score).slice(0, 120);
+  const kept = [];
+  for (let i = 0; i < queue.length; i += 6) {
+    if (state.scan !== scan) return;
+    for (const x of queue.slice(i, i + 6)) { const r = refine(x); if (r) kept.push(r); }
+    scanProgress(scan, 0.8 + 0.2 * Math.min(1, (i + 6) / queue.length), `Double-checking ${queue.length} ideas on every remaining day…`);
+    await tick();
+  }
+  scan.ideas = kept.sort((x, y) => y.score - x.score);
   await tick();
   if (state.scan !== scan) return;
   const big = getCtx();
@@ -736,40 +741,66 @@ async function runTradeScan(force = false) {
   if (state.tab === 'trade' && state.scan === scan) { state.keepScroll = true; render(); }
 }
 
+function scanProgress(scan, frac, text) {
+  scan.frac = frac;
+  scan.msg = text;
+  const bar = document.getElementById('scan-bar');
+  if (bar) bar.style.width = `${(frac * 100).toFixed(0)}%`;
+  const msg = document.getElementById('scan-msg');
+  if (msg) msg.textContent = text;
+}
+
 function loadIntoAnalyzer(idea) {
   state.trade = { partner: idea.partner.id, give: idea.give.map(p => p.id), get: idea.get.map(p => p.id) };
 }
 
+const TYPE_LABEL = { '1for1': '1-for-1', '2for1': '2-for-1', '1for2': '1-for-2', '2for2': '2-for-2' };
+
 function vTradeIdeas() {
-  const { an } = state;
+  const { an, model: m } = state;
   const sc = state.scan;
+  const f = state.ideaView ||= { kind: 'all', type: 'all', partner: 'all', limit: 10 };
   const needs = getNeeds();
   const mine = needs.byTeam[an.my.id];
   const label = id => needs.label(id);
-  const head = `<h3>Trade ideas <span class="r muted small">${sc?.status === 'done' ? `scanned ${sc.total} teams · rest of season + playoffs` : ''}
-    ${sc?.status === 'done' ? '<button class="link" data-act="rescan">Rescan</button>' : ''}</span></h3>`;
-  if (!sc || sc.status !== 'done') {
-    return `<section class="card">${head}<div class="scan"><div class="scanbar"><i id="scan-bar" style="width:${sc ? (sc.done / Math.max(1, sc.total) * 100).toFixed(0) : 0}%"></i></div>
-      <p class="muted small">Testing 1-for-1, 2-for-1 and 1-for-2 deals against every roster, with positions, schedules and injuries…</p></div></section>`;
+  const done = sc?.status === 'done';
+  const head = `<h3>Trade ideas <span class="r muted small">${done ? `${sc.ideas.length} ideas from ${sc.total} teams · rest of season + playoffs <button class="link" data-act="rescan">Rescan</button>` : ''}</span></h3>`;
+  if (!done) {
+    return `<section class="card">${head}<div class="scan"><div class="scanbar"><i id="scan-bar" style="width:${((sc?.frac || 0) * 100).toFixed(0)}%"></i></div>
+      <p class="muted small" id="scan-msg">${esc(sc?.msg || 'Testing 1-for-1, 2-for-1, 1-for-2 and 2-for-2 deals against every roster, with positions, schedules and injuries…')}</p></div></section>`;
   }
-  // Top ideas, at most two per partner so the list covers the league.
-  const per = {}, ideas = [];
-  for (const x of sc.ideas) {
-    if ((per[x.partner.id] = (per[x.partner.id] || 0) + 1) > 2) continue;
-    ideas.push(x);
-    if (ideas.length >= 8) break;
+  if (!sc.ideas.length) return `<section class="card">${head}<p class="muted">No trades found that clearly help you without hurting the other team. Your lineup may already be well balanced, or try the Season avg projection.</p></section>`;
+
+  // Filters (with counts), then a league-wide mix: at most 3 per team near the top.
+  const count = (k, v) => sc.ideas.filter(x => x[k] === v).length;
+  const chip = (act, v, text, n) => `<button class="chip ${f[act === 'ik' ? 'kind' : 'type'] === v ? 'on' : ''}" data-act="${act}" data-v="${v}">${text}${n != null ? ` <small>${n}</small>` : ''}</button>`;
+  const kinds = Object.entries(A.IDEA_KINDS).filter(([k]) => count('kind', k)).map(([k, t]) => chip('ik', k, t, count('kind', k))).join('');
+  const types = A.DEAL_TYPES.filter(t => count('type', t)).map(t => chip('it', t, TYPE_LABEL[t], count('type', t))).join('');
+  const partners = [...new Set(sc.ideas.map(x => x.partner.id))].map(id => m.teams.find(t => t.id === id))
+    .map(t => `<option value="${t.id}" ${f.partner === t.id ? 'selected' : ''}>${esc(t.name)} (${sc.ideas.filter(x => x.partner.id === t.id).length})</option>`).join('');
+  const filters = `<div class="chips ideafilters">${chip('ik', 'all', 'All')}${kinds}<span class="chipsep"></span>${chip('it', 'all', 'Any deal')}${types}
+    <select class="tsel" data-act="ip"><option value="all">All teams</option>${partners}</select></div>`;
+
+  let list = sc.ideas.filter(x => (f.kind === 'all' || x.kind === f.kind) && (f.type === 'all' || x.type === f.type) && (f.partner === 'all' || x.partner.id === f.partner));
+  if (f.partner === 'all') {
+    const per = {}, top = [], later = [];
+    for (const x of list) ((per[x.partner.id] = (per[x.partner.id] || 0) + 1) <= 3 ? top : later).push(x);
+    list = [...top, ...later];
   }
-  if (!ideas.length) return `<section class="card">${head}<p class="muted">No trades found that clearly help you without hurting the other team. Your lineup may already be well balanced, or try the Season avg projection.</p></section>`;
+  const shown = list.slice(0, f.limit);
   const side = ps => ps.map(p => `<div class="tchip">${pCell(p)}<span class="num">${f1(val(p))}</span></div>`).join('');
-  const cards = ideas.map((x, i) => {
-    const r = x.reason;
+  const full = { days: A.futureDays(m), scale: 1 };
+  const cards = shown.map(x => {
+    const r = x.reason ||= A.tradeReason(m, an.my, x, state.settings.basis, full);
     const why = [];
     if (r?.best) why.push(`${mine.weak.includes(r.best.id) ? 'Fixes your weak' : 'Stronger at'} ${label(r.best.id)} (${signed(r.best.d, 1)} pts/day)`);
     if (r && Math.abs(r.starts) >= 2) why.push(`${signed(r.starts)} games started`);
     if (x.drops.length) why.push(`you drop ${x.drops.map(p => esc(p.name)).join(', ')}`);
+    if (x.theirDrops.length) why.push(`they drop ${x.theirDrops.map(p => esc(p.name)).join(', ')}`);
     return `<div class="idea">
       <div class="idea-top">
-        <span class="kind ${x.kind}">${x.kind === 'win-win' ? 'Win-win' : 'Fair on paper'}</span>
+        <span class="kind ${x.kind}">${A.IDEA_KINDS[x.kind]}</span>
+        <span class="dtype">${TYPE_LABEL[x.type] || ''}</span>
         <span>with <button class="tlink" data-view="${x.partner.id}">${esc(x.partner.name)}</button></span>
         <span class="spacer"></span>
         <span class="g-me" title="Your projected points, rest of season + playoffs">${signed(x.myGain)} you</span>
@@ -780,8 +811,11 @@ function vTradeIdeas() {
         <button class="btn mini" data-act="idea" data-i="${sc.ideas.indexOf(x)}">Open in analyzer</button></div>
     </div>`;
   }).join('');
-  return `<section class="card">${head}<div class="ideas">${cards}</div>
-    <p class="muted small">"Win-win" = both teams project to score more. "Fair on paper" = they get at least as much Proj/G and lose little in fit, so they may say yes. Gains are projected points over the rest of the regular season plus playoffs.</p></section>`;
+  const more = list.length > shown.length
+    ? `<button class="btn morebtn" data-act="more-ideas">Show ${Math.min(10, list.length - shown.length)} more <small>(${list.length - shown.length} left)</small></button>` : '';
+  return `<section class="card">${head}${filters}
+    <div class="ideas">${cards || '<p class="muted">No ideas match these filters.</p>'}</div>${more}
+    <p class="muted small">Win-win = both teams project to score more. Fair on paper = they get at least as much Proj/G and lose little in fit. Worth asking = close in value on paper, but it costs them more, so expect a counter. Gains are projected points over the rest of the regular season plus playoffs.</p></section>`;
 }
 
 function vNeeds() {
@@ -1160,6 +1194,12 @@ document.addEventListener('click', async e => {
     return;
   }
   if (act === 'rescan') { runTradeScan(true); return; }
+  if (act === 'ik' || act === 'it') {
+    const f = state.ideaView;
+    f[act === 'ik' ? 'kind' : 'type'] = t.dataset.v;
+    f.limit = 10; state.keepScroll = true; render(); return;
+  }
+  if (act === 'more-ideas') { state.ideaView.limit += 10; state.keepScroll = true; render(); return; }
   if (act === 'recap') {
     navigator.clipboard.writeText(recapText()).then(() => toast('Recap copied: paste it in your group chat'), () => toast('Couldn\'t copy. Try again.'));
     return;
@@ -1223,6 +1263,7 @@ document.addEventListener('change', async e => {
   const act = e.target.dataset.act;
   if (act === 'view') { setView(+e.target.value); return; }
   if (act === 'partner') { state.trade.partner = +e.target.value; state.trade.get = []; render(); return; }
+  if (act === 'ip') { const v = e.target.value; Object.assign(state.ideaView, { partner: v === 'all' ? 'all' : +v, limit: 10 }); state.keepScroll = true; render(); return; }
   if (e.target.dataset.trade) {
     const side = e.target.dataset.trade, id = +e.target.value;
     const list = state.trade[side];

@@ -456,3 +456,13 @@ tr.dim td { opacity: .55; }
 .pbar span { position: relative; padding-left: 6px; font-family: var(--display); font-weight: 700; font-size: 13px; line-height: 18px; }
 tr.me .pbar i { background: var(--volt); }
 tr.me .pbar span { color: var(--ink); }
+
+/* ---------- trade idea filters */
+.ideafilters { margin-bottom: 12px; }
+.ideafilters .chip small { opacity: .65; margin-left: 2px; }
+.ideafilters .tsel { margin-left: auto; }
+.chipsep { width: 1px; height: 18px; background: var(--line-2); margin: 0 4px; }
+.dtype { font-family: var(--display); font-weight: 700; font-size: 10.5px; letter-spacing: .1em; color: var(--muted); border: 1px solid var(--line-2); border-radius: 3px; padding: 1px 5px; }
+.kind.ask { border: 1px dashed var(--warn); color: var(--warn); }
+.morebtn { display: block; margin: 12px auto 4px; }
+.morebtn small { opacity: .6; margin-left: 4px; }

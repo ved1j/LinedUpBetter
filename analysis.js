@@ -570,13 +570,16 @@ export function teamNeeds(m, basis) {
 // consolidations (two of yours for one better player) and 1-for-2 depth deals. Each is
 // scored on rest-of-season + playoff projections for BOTH rosters, so suggestions fix a
 // real lineup need for you without obviously hurting them.
-export const DEAL_TYPES = ['1for1', '2for1', '1for2'];
+export const DEAL_TYPES = ['1for1', '2for1', '1for2', '2for2'];
 export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TYPES) {
   const v = p => value(p, basis);
   const theirBase = ctx.S(other.roster);
-  const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 9);
+  const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 11);
   const mine = pieces(my), theirs = pieces(other);
   const sum = ps => ps.reduce((a, p) => a + v(p), 0);
+  // "On paper" value with a star premium: managers rate one 45 FP/G player above a
+  // 30 + 25 pair because lineup spots are limited, so 2-for-1s are judged that way.
+  const paper = ps => ps.reduce((a, p) => a + Math.max(0, v(p)) ** 1.5, 0);
   const out = [];
   const consider = (give, get) => {
     const a = applyTrade(my.roster, give, get, basis);
@@ -585,16 +588,17 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
     if (myGain < 0) return;
     const z = applyTrade(other.roster, get, give, basis);
     const theirGain = ctx.S(z.after) - theirBase;
-    const giveV = sum(give), getV = sum(get);
+    const giveV = sum(give), getV = sum(get), paperGive = paper(give), paperGet = paper(get);
     // Same acceptance rule as the exact pass, with slack for sampling noise.
     const slack = 60 + 0.15 * Math.abs(myGain);
-    const rated = rateIdea(myGain + slack, theirGain + slack, giveV * 1.03, getV);
+    const rated = rateIdea(myGain + slack, theirGain + slack, paperGive * 1.03, paperGet);
     if (!rated) return;
-    out.push({ partner: other, give, get, myGain, theirGain, giveV, getV, drops: a.drops, theirDrops: z.drops, score: rated.score });
+    out.push({ partner: other, give, get, type: `${give.length}for${get.length}`, myGain, theirGain, giveV, getV, paperGive, paperGet,
+      drops: a.drops, theirDrops: z.drops, score: rated.score });
   };
   if (types.includes('1for1')) for (const a of mine) for (const b of theirs) {
     const r = v(b) / Math.max(1, v(a));
-    if (r >= 0.8 && r <= 1.3) consider([a], [b]);
+    if (r >= 0.75 && r <= 1.35) consider([a], [b]);
   }
   if (types.includes('2for1')) for (let i = 0; i < mine.length; i++) for (let j = i + 1; j < mine.length; j++) {
     const two = v(mine[i]) + v(mine[j]);
@@ -609,50 +613,70 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
     if (v(a) <= Math.max(v(theirs[i]), v(theirs[j])) || v(a) > 0.9 * two || v(a) < 0.6 * two) continue;
     consider([a], [theirs[i], theirs[j]]);
   }
-  return keepBest(out);
+  if (types.includes('2for2')) {
+    // 2-for-2: swap two of your top players for two of theirs with similar total value.
+    const pairs = list => list.slice(0, 5).flatMap((a, i, l) => l.slice(i + 1).map(b => [a, b]));
+    for (const g of pairs(mine)) for (const t of pairs(theirs)) {
+      const r = sum(t) / Math.max(1, sum(g));
+      if (r >= 0.85 && r <= 1.18) consider(g, t);
+    }
+  }
+  // Best few of each deal type, so one shape (2-for-2 has the most combinations)
+  // can't crowd out the others.
+  return DEAL_TYPES.flatMap(t => keepBest(out.filter(x => x.type === t), 5));
 }
 
-// Best few ideas for one partner, without repeating the same incoming players.
-export function keepBest(ideas, n = 6) {
-  const kept = [], seen = new Set();
+// Best ideas for one partner: no duplicate deals, and at most two ideas that bring
+// back the same incoming players (so one target doesn't crowd out the rest).
+export function keepBest(ideas, n = 12) {
+  const kept = [], seen = new Set(), perGet = {};
   for (const x of ideas.slice().sort((a, b) => b.score - a.score)) {
-    const key = x.get.map(p => p.id).join(',');
-    if (seen.has(key)) continue;
+    const getKey = x.get.map(p => p.id).sort().join(',');
+    const key = `${x.give.map(p => p.id).sort().join(',')}>${getKey}`;
+    if (seen.has(key) || (perGet[getKey] || 0) >= 2) continue;
     seen.add(key);
+    perGet[getKey] = (perGet[getKey] || 0) + 1;
     kept.push(x);
     if (kept.length >= n) break;
   }
   return kept;
 }
 
-// Would they plausibly say yes? Either it helps them too, or it looks fair on paper
-// (they receive at least as much per-game value) and doesn't cost them much. Ranked by
-// your gain, nudged up when it helps them too (easier yes) and down harder when it
+// Would they plausibly say yes?
+//  win-win: it helps them too.
+//  fair:    they get at least ~as much value on paper (with a star premium) and lose
+//           little in fit.
+//  ask:     close in value on paper but costs them more; still worth proposing.
+// Ranked by your gain, nudged up when it helps them (easier yes) and down when it
 // costs them (harder sell).
+export const IDEA_KINDS = { 'win-win': 'Win-win', fair: 'Fair on paper', ask: 'Worth asking' };
 function rateIdea(myGain, theirGain, giveV, getV) {
-  if (myGain < 12) return null;
-  const winWin = theirGain >= 0;
-  const fair = giveV >= getV * 0.97 && theirGain >= -0.5 * myGain;
-  if (!winWin && !fair) return null;
-  return { kind: winWin ? 'win-win' : 'fair', score: myGain + (winWin ? 0.6 * Math.min(theirGain, myGain) : 1.2 * theirGain) };
+  if (myGain < 8) return null;
+  if (theirGain >= 0) return { kind: 'win-win', score: myGain + 0.6 * Math.min(theirGain, myGain) };
+  if (giveV >= getV * 0.95 && theirGain >= -0.6 * myGain) return { kind: 'fair', score: myGain + 1.2 * theirGain };
+  if (giveV >= getV * 0.88 && theirGain >= -1.0 * myGain) return { kind: 'ask', score: myGain + 1.5 * theirGain };
+  return null;
 }
 
-// Re-score the most promising screened ideas on every remaining day (no sampling), so
-// the numbers match the trade analyzer exactly; drop any that no longer hold up.
-export function refineIdeas(m, my, ideas, basis, top = 30) {
+// Re-score screened ideas on every remaining day (no sampling), so the numbers match
+// the trade analyzer exactly. Returns a function that refines one idea (or null if it
+// no longer holds up), so callers can work through a long list in small steps.
+export function makeRefiner(m, my, basis) {
   const days = futureDays(m);
   const S = roster => projectDays(m, roster, days, basis).total;
   const base = new Map();
   const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster)); return base.get(t.id); };
-  const out = [];
-  for (const x of ideas.slice().sort((a, b) => b.score - a.score).slice(0, top)) {
+  return x => {
     const a = applyTrade(my.roster, x.give, x.get, basis);
     const z = applyTrade(x.partner.roster, x.get, x.give, basis);
     const myGain = S(a.after) - baseOf(my), theirGain = S(z.after) - baseOf(x.partner);
-    const rated = rateIdea(myGain, theirGain, x.giveV, x.getV);
-    if (rated) out.push({ ...x, myGain, theirGain, drops: a.drops, theirDrops: z.drops, ...rated });
-  }
-  return out.sort((a, b) => b.score - a.score);
+    const rated = rateIdea(myGain, theirGain, x.paperGive, x.paperGet);
+    return rated ? { ...x, myGain, theirGain, drops: a.drops, theirDrops: z.drops, ...rated } : null;
+  };
+}
+export function refineIdeas(m, my, ideas, basis, top = 80) {
+  const refine = makeRefiner(m, my, basis);
+  return ideas.slice().sort((a, b) => b.score - a.score).slice(0, top).map(refine).filter(Boolean).sort((a, b) => b.score - a.score);
 }
 
 // Why a trade helps: which lineup slots get stronger and how many more starts you get.
