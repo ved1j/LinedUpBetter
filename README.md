@@ -40,5 +40,5 @@ Every number uses your league's own scoring (points per stat), lineup size, matc
 - Trade ideas are screened on sampled days, then the best are re-checked on every remaining day, so their numbers match the analyzer exactly.
 - Injuries: players count from ESPN's expected return date. Out-for-season players never return; players out with no return date are not counted until ESPN posts one; day-to-day players are discounted 20% for the current matchup only.
 - Projections fill each day's lineup optimally while respecting position eligibility (PG/SG/G/UTIL...).
-- Data is cached for 3 minutes; ↻ forces a refresh.
+- Data refreshes after a minute; ↻ forces a refresh (e.g. right after changing your lineup on ESPN). Lineups are read for today specifically, matching the TODAY view on ESPN.
 - ESPN's API is unofficial and can change between seasons.

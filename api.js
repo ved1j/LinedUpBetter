@@ -90,8 +90,25 @@ export async function loadLeague({ leagueId, season }) {
     getJSON(`${leagueUrl}?view=kona_player_info`, faFilter),
   ]);
   const model = normalize(league, pro, fa, season, leagueId);
-  await Promise.all([addInjuryReturns(model, leagueUrl), addMarketData(model, leagueUrl)]);
+  await Promise.all([addInjuryReturns(model, leagueUrl), addMarketData(model, leagueUrl), applyTodaysLineups(model, leagueUrl)]);
   return model;
+}
+
+// ESPN keeps a separate lineup for every day. Ask for today's explicitly, so "who's
+// starting" matches the TODAY view on ESPN instead of another day's lineup.
+async function applyTodaysLineups(model, leagueUrl) {
+  try {
+    const data = await getJSON(`${leagueUrl}?view=mRoster&scoringPeriodId=${model.currentSP}`);
+    for (const t of data.teams || []) {
+      const team = model.teams.find(x => x.id === t.id);
+      if (!team) continue;
+      const slotOf = new Map((t.roster?.entries || []).map(e => [e.playerId, e.lineupSlotId]));
+      for (const p of team.roster) if (slotOf.has(p.id)) p.slot = slotOf.get(p.id);
+    }
+    model.lineupDay = model.currentSP;
+  } catch (e) {
+    console.warn("Couldn't load today's lineups; using the default roster view", e);
+  }
 }
 
 // Draft position, auction value and ESPN rank ("name value") come with ESPN's player
@@ -248,6 +265,7 @@ function normalize(L, P, F, season, leagueId) {
     matchups,
     freeAgents,
     poolFAs: null, // set on the analysis copy (all free agents, incl. hidden ones)
+    lineupDay: null, // scoring period the lineup slots are for (set by applyTodaysLineups)
     proTeams,
     myTeamId: null,
   };

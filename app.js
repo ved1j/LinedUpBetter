@@ -18,7 +18,7 @@ const full = new URLSearchParams(location.search).has('full') || !isExt;
 document.body.classList.toggle('full', full);
 
 const defaultSeason = () => { const d = new Date(); return d.getMonth() >= 7 ? d.getFullYear() + 1 : d.getFullYear(); };
-const CACHE_MS = 3 * 60 * 1000; // short: live scores must keep up with started games
+const CACHE_MS = 60 * 1000; // short: live scores and lineup changes on ESPN show up quickly
 const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['waivers', 'Waivers'], ['trade', 'Trade'], ['playoffs', 'Playoffs'], ['watchlist', 'Watchlist'], ['league', 'League'], ['settings', 'Settings']];
 
 const state = {
@@ -194,7 +194,7 @@ async function load(force = false) {
     let model;
     if (s.demo) model = makeDemo();
     else {
-      const key = `cache:v8:${s.leagueId}:${s.season}`; // bump when the parser changes
+      const key = `cache:v9:${s.leagueId}:${s.season}`; // bump when the parser changes
       const c = force ? null : await store.get(key);
       if (c && Date.now() - c.at < CACHE_MS) model = c.model;
       else {
@@ -589,18 +589,20 @@ function vLineupCard() {
   const lc = an.lineup;
   if (!lc) return '';
   const today = A.fmtDow(A.spDate(m, m.currentSP)) + ' ' + A.fmtMD(A.spDate(m, m.currentSP));
-  if (lc.gain < 1) {
-    return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today}</span></h3>
+  const asOf = m.fetchedAt ? `ESPN lineup as of ${new Date(m.fetchedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : 'ESPN lineup';
+  if (lc.gain < 1 || !lc.start.length) {
+    return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today} · ${asOf}</span></h3>
       <p class="okline">✓ Optimal: your starters are the best lineup for today's games (≈${f0(lc.best)} pts).</p></section>`;
   }
-  const li = (ps, cls) => ps.map(p => `<li class="${cls}">${pCell(p)}<span class="num muted small">${A.gameOn(m, p, m.currentSP) ? f1(val(p)) + ' proj' : 'no game'}</span></li>`).join('');
+  const li = (ps, cls, note) => ps.map(p => `<li class="${cls}">${pCell(p)}<span class="num muted small">${note(p)}</span></li>`).join('');
+  const startNote = p => `${f1(A.dayValue(m, p, m.currentSP, state.settings.basis))} proj today`;
   return `<section class="card lineup"><h3>Today's lineup <span class="r muted small">${today} · ESPN lineup vs best possible</span></h3>
     <div class="swap">
-      <div><div class="rk-label">Start</div><ul class="plist">${li(lc.start, 'in') || '<li class="muted">–</li>'}</ul></div>
+      <div><div class="rk-label">Start</div><ul class="plist">${li(lc.start, 'in', startNote)}</ul></div>
       <div class="gainbox"><b>+${f0(lc.gain)}</b><span>pts today</span></div>
-      <div><div class="rk-label">Sit</div><ul class="plist">${li(lc.sit, 'out') || '<li class="muted">–</li>'}</ul></div>
+      <div><div class="rk-label">Bench</div><ul class="plist">${li(lc.sit, 'out', p => lc.why(p)) || `<li class="muted small">Nobody: ${lc.intoOpen === 1 ? 'there\'s an open slot' : 'there are open slots'} for them.</li>`}</ul></div>
     </div>
-    <p class="muted small">Based on today's NBA games and position rules. Make the swap on ESPN before tip-off.</p></section>`;
+    <p class="muted small">Based on your ${asOf}, today's NBA games and position rules. Changed your lineup on ESPN? Hit ↻ to refresh.</p></section>`;
 }
 
 function vPlanCard() {
@@ -1317,7 +1319,7 @@ function vSettings() {
         <li>Season is the year the NBA season ends (2026-27 → <code>2027</code>).</li>
         <li>Private league? Just be signed in at fantasy.espn.com. LinedUpBetter loads your league through an ESPN tab (it opens one in the background if needed), so your login just works.</li>
         <li>Your team is auto-detected from your ESPN login. Pick another above, or use ☆ next to the team switcher to star any team as your main one.</li>
-        <li>Data is cached for 3 minutes. Hit ↻ (or press R) to force a refresh.</li>
+        <li>Data refreshes after a minute. Hit ↻ (or press R) to force a refresh, for example right after changing your lineup on ESPN.</li>
         <li>Shortcuts: <code>1</code>–<code>9</code> switch tabs, <code>←</code> <code>→</code> step through weeks, <code>Esc</code> closes the player panel.</li>
       </ol></section>
     ${state.error ? `<section class="card err"><h3>Last error</h3><p>${esc(state.error)}</p></section>` : ''}`;

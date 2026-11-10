@@ -312,23 +312,44 @@ export function slotsLeftToday(m, roster) {
 // Back-to-back: the player's NBA team also played the day before.
 export const isB2B = (m, p, sp) => !!(gameOn(m, p, sp) && gameOn(m, p, sp - 1));
 
+// A player's points per game on a day, exactly as projections value it (day-to-day
+// discount, teammate usage, back-to-back rest).
+export function dayValue(m, p, sp, basis) {
+  const v = value(p, basis);
+  return v * dtdFactor(m, p, sp) * dayFactor(m, p, sp, basis, v);
+}
+
 // ---- Today's lineup vs the best possible one
 export function lineupCheck(m, team, basis) {
   const sp = m.currentSP;
   if (!(m.periods[m.currentPeriod] || []).includes(sp)) return null;
   const best = projectDays(m, team.roster, [sp], basis).days[0];
-  const v = p => value(p, basis) * (isDTD(p) ? 0.8 : 1);
-  // Players whose game already tipped off are locked; only compare the rest.
-  const starting = team.roster.filter(p => p.slot != null && p.slot < 12 && !(gameOn(m, p, sp) && !gameLeft(m, p, sp)));
-  const current = starting.filter(p => gameLeft(m, p, sp) && availableOn(m, p, sp)).reduce((a, p) => a + v(p), 0);
+  const v = p => dayValue(m, p, sp, basis);
+  const plays = p => gameLeft(m, p, sp) && availableOn(m, p, sp);
+  const locked = p => gameOn(m, p, sp) && !gameLeft(m, p, sp); // game already tipped off
+  const inSlot = team.roster.filter(p => p.slot != null && p.slot < 12);
+  const starting = inSlot.filter(p => !locked(p));
+  // Your current starters, valued the same way as the best lineup (so an already-optimal
+  // lineup shows no gain).
+  const current = starting.filter(plays).reduce((a, p) => a + v(p), 0);
   const bestSet = new Set(best.starters);
   const start = best.starters.filter(p => !(p.slot < 12));
-  // One bench move per start: sit idle/injured starters first, then the weakest.
-  const idle = p => !gameLeft(m, p, sp) || !availableOn(m, p, sp);
+  // Open starting slots take incoming players without benching anyone (if eligible);
+  // only the rest need someone to sit.
+  const open = startingSlots(m);
+  for (const p of inSlot) { const i = open.indexOf(p.slot); if (i >= 0) open.splice(i, 1); }
+  let needSits = 0;
+  for (const p of start) {
+    const i = open.findIndex(s => !p.slots?.length || p.slots.includes(s));
+    if (i >= 0) open.splice(i, 1); else needSits++;
+  }
+  // Sit idle starters first (no game / injured), then the weakest.
+  const idle = p => !plays(p);
   const sit = starting.filter(p => !bestSet.has(p))
     .sort((a, b) => idle(b) - idle(a) || v(a) - v(b))
-    .slice(0, start.length);
-  return { gain: best.pts - current, start, sit, best: best.pts, current };
+    .slice(0, needSits);
+  const why = p => (!gameOn(m, p, sp) ? 'no game today' : !availableOn(m, p, sp) ? 'out' : locked(p) ? 'locked' : 'weaker option');
+  return { gain: best.pts - current, start, sit, best: best.pts, current, why, intoOpen: start.length - needSits };
 }
 
 // ---- Streaming plan: sequence of add/drop moves for the rest of the matchup
@@ -720,12 +741,15 @@ export function analyze(m, basis = 'smart') {
   } else if (matchup?.bye) note('info', 'Matchup', 'Bye week', 'No matchup this period.');
 
   const lc = lineupCheck(m, my, basis);
-  if (lc && lc.gain >= 1) {
+  if (lc && lc.gain >= 1 && lc.start.length) {
     note('bad', 'Today', `Set your lineup: +${Math.round(lc.gain)} pts today`,
-      [lc.start.length ? `Start ${lc.start.map(p => p.name).join(', ')}` : '', lc.sit.length ? `sit ${lc.sit.map(p => p.name).join(', ')}` : ''].filter(Boolean).join('; ') + '.');
+      [`Start ${lc.start.map(p => p.name).join(', ')}${lc.intoOpen ? (lc.sit.length ? '' : ' (open slots, no one needs to sit)') : ''}`,
+        lc.sit.length ? `bench ${lc.sit.map(p => `${p.name} (${lc.why(p)})`).join(', ')}` : ''].filter(Boolean).join('; ') + '.');
   }
-  for (const p of my.roster) {
-    if (!availableOn(m, p, m.currentSP) && p.slot !== 12 && p.slot !== 13 && !(lc && lc.sit.includes(p))) note('bad', 'Lineup', `${p.name} is out and starting`, `${returnLabel(p)}. Swap in a healthy bench player before lock.`);
+  // An injured starter only costs you if someone healthy could take the slot, which is
+  // exactly what lineupCheck decides; warn separately only when it can't run.
+  if (!lc) for (const p of my.roster) {
+    if (!availableOn(m, p, m.currentSP) && p.slot != null && p.slot < 12) note('bad', 'Lineup', `${p.name} is out and starting`, `${returnLabel(p)}. Swap in a healthy bench player before lock.`);
   }
   const irSlots = m.slotCounts?.[13] || 0;
   const inIR = my.roster.filter(p => p.slot === 13);
