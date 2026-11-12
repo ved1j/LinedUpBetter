@@ -390,7 +390,9 @@ export function addsLeft(m, team) {
 }
 
 // ---- Playoff odds: Monte Carlo over the remaining regular-season matchups
-export function playoffOdds(m, basis, sims = 3000) {
+// With trackId, also records for each of that team's remaining matchups how often it
+// makes the playoffs after winning vs losing it (the matchups that matter most).
+export function playoffOdds(m, basis, sims = 3000, trackId = null) {
   const left = m.matchups.filter(x => x.period >= m.currentPeriod && x.period <= m.regularPeriods && x.home && x.away);
   const team = id => m.teams.find(t => t.id === id);
   const games = left.map(x => {
@@ -410,20 +412,35 @@ export function playoffOdds(m, basis, sims = 3000) {
   }
   let seed = 12345;
   const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const mine = trackId == null ? [] : games.map((g, i) => (g.h === trackId || g.a === trackId ? i : -1)).filter(i => i >= 0);
+  const lev = mine.map(() => ({ win: 0, inWin: 0, inLoss: 0 }));
+  const won = new Array(games.length);
   for (let s = 0; s < sims; s++) {
     const w = Object.fromEntries(m.teams.map(t => [t.id, t.wins]));
-    for (const g of games) w[rnd() < g.wp ? g.h : g.a]++;
+    games.forEach((g, i) => { const hw = rnd() < g.wp; won[i] = hw; w[hw ? g.h : g.a]++; });
     const order = ids.slice().sort((a, b) => w[b] - w[a] || pf0[b] - pf0[a] + (rnd() - 0.5) * 60);
     order.forEach((id, i) => {
       if (i < n) res[id].playoff++;
       if (i < byes) res[id].bye++;
       res[id].seed += i + 1;
     });
+    if (mine.length) {
+      const made = order.indexOf(trackId) < n;
+      mine.forEach((gi, k) => {
+        const iWon = won[gi] === (games[gi].h === trackId);
+        if (iWon) { lev[k].win++; if (made) lev[k].inWin++; } else if (made) lev[k].inLoss++;
+      });
+    }
   }
   for (const id of ids) {
     res[id].playoff /= sims; res[id].bye /= sims; res[id].seed /= sims;
   }
-  return { teams: res, byes, simulated: games.length };
+  const leverage = mine.map((gi, k) => {
+    const g = left[gi], x = lev[k];
+    const ifWin = x.win ? x.inWin / x.win : 0, ifLoss = sims - x.win ? x.inLoss / (sims - x.win) : 0;
+    return { period: g.period, opp: team(g.home.teamId === trackId ? g.away.teamId : g.home.teamId), wp: x.win / sims, ifWin, ifLoss, swing: ifWin - ifLoss };
+  });
+  return { teams: res, byes, simulated: games.length, leverage };
 }
 
 // ---- Trade value ("name value")
@@ -1107,4 +1124,123 @@ export function powerRankings(m, basis, needs) {
 export function breakdown(m, team, period, basis) {
   const r = projectDays(m, team.roster, daysLeft(m, period), basis, true);
   return { total: r.total, games: r.games, rows: [...r.players.entries()].map(([p, x]) => ({ p, ...x })).sort((a, b) => b.pts - a.pts || b.avail - a.avail) };
+}
+
+
+// ---- Weekly slate (one matchup week, day by day)
+// NBA games each night, your projected starts vs your opponent's, NBA teams grouped by
+// games that week, and for every remaining day the free agent most worth adding that
+// day (with the player to drop), plus two backups. `fas` = free agents you'd consider.
+export function weeklySlate(m, my, period, basis, fas) {
+  const days = m.periods[period] || [];
+  const team = id => m.teams.find(t => t.id === id);
+  const mu = m.matchups.find(x => x.period === period && (x.home?.teamId === my.id || x.away?.teamId === my.id));
+  const opp = mu ? team(mu.home?.teamId === my.id ? mu.away?.teamId : mu.home?.teamId) : null;
+  const left = daysLeft(m, period);
+  const mineP = projectDays(m, my.roster, left, basis), theirsP = opp ? projectDays(m, opp.roster, left, basis) : null;
+  const myDay = Object.fromEntries(mineP.days.map(d => [d.sp, d]));
+  const oppDay = theirsP ? Object.fromEntries(theirsP.days.map(d => [d.sp, d])) : {};
+  const nbaGames = sp => Object.values(m.proTeams).filter(t => t.games[sp]).length / 2;
+  const teams = Object.entries(m.proTeams).map(([id, t]) => ({
+    id: +id, abbrev: t.abbrev,
+    games: days.filter(sp => t.games[sp]).length,
+    b2b: days.filter(sp => t.games[sp] && t.games[sp - 1]).length,
+  }));
+  const groups = {};
+  for (const t of teams) (groups[t.games] ||= []).push(t);
+
+  // Best add for each remaining day: swap one of your three least useful players for a
+  // free agent from that day to the end of the week.
+  const drops = my.roster.filter(p => p.slot !== 13).sort((a, b) => value(a, basis) - value(b, basis)).slice(0, 3);
+  const pool = fas.filter(p => !p.outForSeason && gamesIn(m, p, left) > 0)
+    .sort((a, b) => value(b, basis) * gamesIn(m, b, left) - value(a, basis) * gamesIn(m, a, left)).slice(0, 40);
+  const adds = {};
+  for (const d of left) {
+    const rest = left.filter(sp => sp >= d);
+    const base = projectDays(m, my.roster, rest, basis).total;
+    adds[d] = pool.filter(p => gameLeft(m, p, d) && availableOn(m, p, d)).map(fa => {
+      let best = null;
+      for (const drop of drops) {
+        const gain = projectDays(m, [...my.roster.filter(p => p !== drop), fa], rest, basis).total - base;
+        if (!best || gain > best.gain) best = { fa, drop, gain };
+      }
+      return { ...best, left: gamesIn(m, fa, rest), week: days.filter(sp => gameOn(m, fa, sp)).length, b2b: isB2B(m, fa, d) };
+    }).filter(x => x.gain >= 3).sort((a, b) => b.gain - a.gain).slice(0, 3);
+  }
+  return {
+    period, days, left, opp,
+    myGames: mineP.games, oppGames: theirsP?.games ?? null,
+    perDay: days.map(sp => ({ sp, nba: nbaGames(sp), past: sp < m.currentSP || !left.includes(sp), mine: myDay[sp], theirs: oppDay[sp], adds: adds[sp] || [] })),
+    groups: Object.entries(groups).map(([g, ts]) => ({ games: +g, teams: ts.sort((a, b) => a.abbrev.localeCompare(b.abbrev)) })).sort((a, b) => b.games - a.games),
+  };
+}
+
+// ---- Injury report with who benefits
+// Every injured player that matters (rostered in this league, or 10%+ rostered on ESPN),
+// their timeline, and the teammates who pick up usage while they're out (from the same
+// teammate-usage model as projections). Free agents who benefit are pickup ideas.
+function absenceShare(m, p, sp, basis) {
+  const u = usageCtx(m, basis);
+  const me = u.own.get(p.id);
+  if (!me || !p.proTeamId) return 0;
+  const d = teamDelta(m, u, p.proTeamId, sp);
+  return Math.min(USAGE_CAP, USAGE_SHARE * me.v * me.base / Math.max(d.active, u.norm));
+}
+export function injuryReport(m, my, basis) {
+  const owner = new Map();
+  for (const t of m.teams) for (const p of t.roster) owner.set(p.id, t);
+  const pool = new Map();
+  for (const t of m.teams) for (const p of t.roster) pool.set(p.id, p);
+  for (const p of m.poolFAs || m.freeAgents || []) if (!pool.has(p.id)) pool.set(p.id, p);
+  const all = [...pool.values()];
+  const rest = futureDays(m);
+  const next14 = Array.from({ length: 14 }, (_, i) => m.currentSP + i);
+  const rows = all.filter(p => (isOut(p) || isDTD(p)) && value(p, basis) >= 12 && (owner.has(p.id) || (p.owned ?? 0) >= 10)).map(p => {
+    const missDay = next14.find(sp => gameOn(m, p, sp) && (!availableOn(m, p, sp) || isDTD(p)));
+    const sched = rest.filter(sp => gameOn(m, p, sp)).length;
+    const missed = rest.filter(sp => gameOn(m, p, sp) && !availableOn(m, p, sp)).length;
+    const bump = missDay && isOut(p) ? absenceShare(m, p, missDay, basis) : 0;
+    const beneficiaries = bump ? all.filter(q => q.id !== p.id && q.proTeamId === p.proTeamId && !isOut(q) && value(q, basis) >= 10)
+      .sort((a, b) => value(b, basis) - value(a, basis)).slice(0, 4)
+      .map(q => ({ q, owner: owner.get(q.id) || null, gain: value(q, basis) * bump })) : [];
+    return { p, owner: owner.get(p.id) || null, missed, sched, bump, beneficiaries, mine: owner.get(p.id)?.id === my.id };
+  });
+  return rows.sort((a, b) => b.mine - a.mine || value(b.p, basis) - value(a.p, basis));
+}
+
+// ---- Matchups that matter
+// Your remaining regular-season matchups ranked by how much a win moves your playoff
+// odds, each with the free agent who'd add the most that week (who to stream for it).
+export function matchupsThatMatter(m, my, basis, fas) {
+  const odds = playoffOdds(m, basis, 3000, my.id);
+  const pool = fas.filter(p => !p.outForSeason).sort((a, b) => value(b, basis) - value(a, basis)).slice(0, 40);
+  const drops = my.roster.filter(p => p.slot !== 13).sort((a, b) => value(a, basis) - value(b, basis)).slice(0, 3);
+  return odds.leverage.sort((a, b) => b.swing - a.swing).slice(0, 4).map(x => {
+    const days = daysLeft(m, x.period);
+    const base = projectDays(m, my.roster, days, basis).total;
+    let stream = null;
+    for (const fa of pool) for (const drop of drops) {
+      const gain = projectDays(m, [...my.roster.filter(p => p !== drop), fa], days, basis).total - base;
+      if (!stream || gain > stream.gain) stream = { fa, drop, gain, games: gamesIn(m, fa, days) };
+    }
+    return { ...x, stream: stream && stream.gain >= 5 ? stream : null };
+  });
+}
+
+// ---- Risers & fallers
+// In-season rank (by this season's average) vs preseason rank (ESPN rank / draft
+// position), plus average vs ESPN's projection. Needs a few games played.
+export function trends(m, basis) {
+  const owner = new Map();
+  for (const t of m.teams) for (const p of t.roster) owner.set(p.id, t);
+  const pool = new Map();
+  for (const t of m.teams) for (const p of t.roster) pool.set(p.id, p);
+  for (const p of m.poolFAs || m.freeAgents || []) if (!pool.has(p.id)) pool.set(p.id, p);
+  const played = [...pool.values()].filter(p => (p.stats?.season?.gp || 0) >= 5 && Number.isFinite(p.stats.season.avg))
+    .sort((a, b) => b.stats.season.avg - a.stats.season.avg);
+  return played.map((p, i) => {
+    const pre = p.espnRank || (p.adp ? Math.round(p.adp) : null);
+    return { p, owner: owner.get(p.id) || null, now: i + 1, pre, move: pre ? pre - (i + 1) : null,
+      avg: p.stats.season.avg, vsProj: p.stats.proj ? p.stats.season.avg - p.stats.proj.avg : null };
+  }).filter(r => r.pre);
 }

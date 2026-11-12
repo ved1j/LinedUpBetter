@@ -483,3 +483,57 @@ tr.me .pbar span { color: var(--ink); }
 .kind.possible { border: 1px dashed var(--info); color: var(--info); }
 .g-me.down { color: var(--bad); }
 .lockmark { margin-left: 5px; font-size: 10px; }
+
+/* ---------- power tiers */
+tr.tier td { font-family: var(--display); font-weight: 700; font-size: 10.5px; letter-spacing: .16em; text-transform: uppercase; color: var(--volt); padding-top: 12px; border-bottom: 1px solid var(--line-2); }
+
+/* ---------- matchups that matter */
+.matter { display: grid; grid-template-columns: 92px 1fr 1.2fr 1.4fr; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
+.matter:first-of-type { border-top: 0; padding-top: 2px; }
+.mt-week { display: flex; flex-direction: column; font-family: var(--display); }
+.mt-week b { font-size: 15px; letter-spacing: .06em; }
+.mt-swing { display: flex; flex-direction: column; }
+.mt-swing b { font-family: var(--display); font-weight: 800; font-size: 20px; color: var(--volt); }
+.mt-stream { display: flex; flex-direction: column; gap: 2px; }
+
+/* ---------- weekly slate */
+.slate-top { display: flex; align-items: flex-end; gap: 18px; margin-bottom: 12px; }
+.slate-top > div { display: flex; flex-direction: column; }
+.slate-top .k { font-family: var(--display); font-weight: 600; font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+.slate-top .v { font-family: var(--display); font-weight: 800; font-size: 28px; line-height: 1; }
+.slate-top .v small { font-size: 12px; color: var(--muted); font-weight: 600; }
+.slate-top > div:first-child .v { color: var(--volt); }
+.vsx { font-family: var(--display); font-style: italic; color: var(--dim); padding-bottom: 4px; }
+.sdays { display: flex; flex-direction: column; }
+.sday { display: grid; grid-template-columns: 54px 150px 74px 1fr; gap: 12px; align-items: center; padding: 9px 0; border-top: 1px solid var(--line); }
+.sday:first-child { border-top: 0; }
+.sday.past { opacity: .4; }
+.sday.today .sd-date b { color: var(--volt); }
+.sd-date { display: flex; flex-direction: column; font-family: var(--display); }
+.sd-date b { font-size: 15px; letter-spacing: .08em; text-transform: uppercase; }
+.sd-date span { color: var(--muted); font-size: 11px; }
+.sd-nba { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); }
+.nbabar { height: 5px; border-radius: 3px; background: rgba(255, 255, 255, .08); overflow: hidden; }
+.nbabar i { display: block; height: 100%; background: var(--info); }
+.nite { font-family: var(--display); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 9.5px; margin-left: 4px; }
+.nite.light { color: var(--volt); }
+.nite.heavy { color: var(--warn); }
+.sd-vs { font-family: var(--display); font-size: 16px; }
+.sd-add .addline { display: flex; align-items: center; gap: 10px; }
+.sd-add .addline .pl { flex: 1; }
+.sd-add .addline b { font-family: var(--display); font-weight: 800; font-size: 17px; }
+.alts { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 4px; }
+.chip.altadd { font-family: var(--body); font-weight: 500; letter-spacing: 0; font-size: 11.5px; padding: 2px 9px; }
+.tgroups { display: flex; flex-direction: column; gap: 6px; }
+.tgroup { display: grid; grid-template-columns: 30px 1fr; gap: 10px; align-items: baseline; }
+.tgroup > b { font-family: var(--display); font-weight: 800; font-size: 18px; color: var(--volt); }
+.tlist2 { display: flex; flex-wrap: wrap; gap: 5px; }
+.tm { font-family: var(--display); font-weight: 600; font-size: 12px; letter-spacing: .06em; padding: 2px 7px; border-radius: 4px; background: var(--surface-2); }
+.tm sup { color: var(--warn); font-size: 8px; margin-left: 2px; }
+
+/* ---------- injuries */
+.injt td { vertical-align: top; }
+.benef { white-space: normal; }
+.chip.benchip { font-family: var(--body); font-weight: 500; letter-spacing: 0; font-size: 11.5px; padding: 2px 8px; margin: 2px 2px 0 0; }
+.chip.benchip.fa { border-color: var(--volt); color: var(--volt); }
+.chip.benchip span { font-family: var(--display); font-weight: 700; font-size: 9.5px; letter-spacing: .1em; }

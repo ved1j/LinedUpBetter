@@ -19,7 +19,7 @@ document.body.classList.toggle('full', full);
 
 const defaultSeason = () => { const d = new Date(); return d.getMonth() >= 7 ? d.getFullYear() + 1 : d.getFullYear(); };
 const CACHE_MS = 60 * 1000; // short: live scores and lineup changes on ESPN show up quickly
-const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['waivers', 'Waivers'], ['trade', 'Trade'], ['playoffs', 'Playoffs'], ['watchlist', 'Watchlist'], ['league', 'League'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['slate', 'Slate'], ['waivers', 'Waivers'], ['trade', 'Trade'], ['injuries', 'Injuries'], ['playoffs', 'Playoffs'], ['league', 'League'], ['watchlist', 'Watchlist'], ['settings', 'Settings']];
 
 const state = {
   settings: { leagueId: '', season: defaultSeason(), teamId: null, basis: 'smart', demo: false, starred: {} },
@@ -572,7 +572,32 @@ function vWaivers() {
     </table></div>
     <p class="muted small">Avg = real season average (same as ESPN). Proj/G = what projections use, blending the average with ESPN's projection early in the season. Wk +FP / ROS + = projected points gained this matchup / rest of season if they replace your drop candidate. UPGRADE = better Proj/G than your drop candidate. W = on waivers (claim, not instant add). ✕ = never suggest this player anywhere (waivers, trade fill-ins, trade ideas). Click a column to sort; click a day to see who plays then. Highlighted games land on days you have open lineup slots (number under the day). Dot = back-to-back.</p>
     ${vHidden()}
-  </section>`;
+  </section>
+  ${vTrends()}`;
+}
+
+// ---- Risers & fallers: in-season rank vs preseason rank
+function vTrends() {
+  const m = state.model;
+  const t = state.trend ||= { mode: 'up', under50: true };
+  const all = memo('trends', () => A.trends(m, state.settings.basis));
+  if (!all.length) return '';
+  let list = all.filter(r => (t.mode === 'up' ? r.move > 0 : r.move < 0) && !isBanned(r.p.id));
+  if (t.under50) list = list.filter(r => (r.p.owned ?? 0) < 50);
+  list = list.sort((a, b) => (t.mode === 'up' ? b.move - a.move : a.move - b.move)).slice(0, 12);
+  const rows = list.map(r => `<tr><td>${pCell(r.p)}</td>
+      <td>${r.owner ? `<button class="tlink small" data-view="${r.owner.id}">${esc(r.owner.name)}</button>` : '<span class="badge b-wv">FA</span>'}</td>
+      <td class="num"><span class="muted small">was ${r.pre}</span> → <b>${r.now}</b></td>
+      <td class="num ${r.move > 0 ? 'up' : 'down'}">${r.move > 0 ? '▲' : '▼'}${Math.abs(r.move)}</td>
+      <td class="num">${f1(r.avg)}</td>
+      <td class="num ${r.vsProj > 0 ? 'up' : r.vsProj < 0 ? 'down' : 'muted'}">${r.vsProj == null ? '–' : signed(r.vsProj, 1)}</td>
+      <td class="num">${r.p.owned != null ? Math.round(r.p.owned) + '%' : '–'}</td></tr>`).join('');
+  return `<section class="card"><h3>Risers &amp; fallers <span class="r muted small">this season's rank vs preseason rank</span></h3>
+    <div class="chips"><button class="chip ${t.mode === 'up' ? 'on' : ''}" data-act="trend" data-v="up">Risers</button><button class="chip ${t.mode === 'down' ? 'on' : ''}" data-act="trend" data-v="down">Fallers</button>
+      <label><input type="checkbox" data-act="under50" ${t.under50 ? 'checked' : ''}> Under 50% rostered</label></div>
+    <div class="scrollx"><table><thead><tr><th>Player</th><th>Owner</th><th class="num">Rank</th><th class="num">Move</th><th class="num">Avg</th><th class="num" title="Season average minus ESPN projection">vs proj</th><th class="num" title="Rostered across ESPN leagues">Rost.</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="7" class="muted">Nobody matches.</td></tr>'}</tbody></table></div>
+    <p class="muted small">Rank = by fantasy points per game this season (5+ games) with your league's scoring; preseason = ESPN rank / draft position. Risers under 50% rostered are breakouts you can often still grab.</p></section>`;
 }
 
 function vHidden() {
@@ -686,21 +711,32 @@ function vPower(st) {
   const { an } = state;
   const needs = getNeeds();
   const pr = A.powerRankings(state.model, state.settings.basis, needs);
+  const odds = getOdds();
   const standRank = Object.fromEntries(st.map((t, i) => [t.id, i + 1]));
   const max = Math.max(...pr.map(r => r.projWk));
-  const rows = pr.map((r, i) => {
+  const tierOf = id => (odds.teams[id].playoff >= 0.7 ? 0 : odds.teams[id].playoff >= 0.25 ? 1 : 2);
+  const TIERS = ['Contenders', 'In the mix', 'Long shots'];
+  const outCount = t => t.roster.filter(p => A.isOut(p) && val(p) >= 15).length;
+  let lastTier = -1;
+  // Grouped by tier (playoff odds), power order within a tier; # stays the power rank.
+  const ordered = pr.map((r, i) => ({ r, i })).sort((a, b) => tierOf(a.r.team.id) - tierOf(b.r.team.id) || a.i - b.i);
+  const rows = ordered.map(({ r, i }) => {
     const move = standRank[r.team.id] - (i + 1);
     const nd = needs.byTeam[r.team.id];
-    return `<tr class="${r.team.id === an.my.id ? 'me' : ''}"><td class="num muted">${i + 1}</td>
-      <td><button class="tlink" data-view="${r.team.id}">${esc(r.team.name)}</button></td>
+    const o = odds.teams[r.team.id], tier = tierOf(r.team.id), n = outCount(r.team);
+    const head = tier !== lastTier ? `<tr class="tier"><td colspan="8">${TIERS[tier]}</td></tr>` : '';
+    lastTier = tier;
+    return `${head}<tr class="${r.team.id === an.my.id ? 'me' : ''}"><td class="num muted">${i + 1}</td>
+      <td><button class="tlink" data-view="${r.team.id}">${esc(r.team.name)}</button>${n ? ` <span class="badge b-out" title="Players out (15+ proj/G)">${n} OUT</span>` : ''}</td>
       <td><div class="pbar"><i style="width:${(r.projWk / max * 100).toFixed(0)}%"></i><span>${f0(r.projWk)}</span></div></td>
       <td class="num">${r.pfWk == null ? '–' : f0(r.pfWk)}</td>
-      <td class="num">${r.team.wins}-${r.team.losses}</td>
+      <td class="num">${r.team.wins}-${r.team.losses} <span class="muted small">→ ${Math.round(o.expW)}-${Math.round(o.expL)}</span></td>
+      <td class="num"><b>${o.playoff >= 0.995 ? '✓' : o.playoff < 0.005 ? '–' : Math.round(o.playoff * 100) + '%'}</b></td>
       <td class="num ${move > 0 ? 'up' : move < 0 ? 'down' : 'muted'}" title="Power rank vs current standing">${move > 0 ? '▲' + move : move < 0 ? '▼' + -move : '–'}</td>
       <td class="small muted">${nd.weak.length ? 'needs ' + nd.weak.slice(0, 2).map(needs.label).join(', ') : ''}</td></tr>`;
   }).join('');
-  return `<section class="card"><h3>Power rankings <span class="r muted small">projected strength from here on, blended with results</span></h3>
-    <div class="scrollx"><table><thead><tr><th class="num">#</th><th>Team</th><th>Proj / week</th><th class="num" title="Actual points per matchup so far">PF / wk</th><th class="num">W-L</th><th class="num" title="Movement vs standings">±</th><th>Biggest need</th></tr></thead><tbody>${rows}</tbody></table></div>
+  return `<section class="card"><h3>Power rankings <span class="r muted small">projected strength from here on, blended with results · tiers by playoff odds</span></h3>
+    <div class="scrollx"><table><thead><tr><th class="num">#</th><th>Team</th><th>Proj / week</th><th class="num" title="Actual points per matchup so far">PF / wk</th><th class="num" title="Record now → projected final">Record</th><th class="num" title="Chance to make the playoffs">Playoffs</th><th class="num" title="Movement vs standings">±</th><th>Biggest need</th></tr></thead><tbody>${rows}</tbody></table></div>
     <p class="muted small">Proj / week = each team's best daily lineups over the rest of the season with current rosters, injuries and NBA schedules. ▲ = better than their record says (buy-low trade partner or sleeping giant), ▼ = record flatters them.</p></section>`;
 }
 
@@ -1118,6 +1154,7 @@ function vMatchups() {
 
   return `<section class="card"><h3>Week ${m.currentPeriod} scoreboard <span class="r muted small">${A.periodRange(m, m.currentPeriod)} · live score + projected final <button class="link" data-act="recap">Copy recap</button></span></h3>
       <div class="board-list">${live || '<p class="muted">No matchups this week.</p>'}</div></section>
+    ${vMatter()}
     ${vBreakdown()}
     <section class="card"><h3>${esc(an.my.name)} · schedule & predictions <span class="r muted small">projected record <b>${Math.round(projW)}-${Math.round(projL)}</b></span></h3>
       <div class="scrollx"><table><thead><tr><th>Week</th><th>Opponent</th><th class="num">Score / Proj</th><th class="num">Win %</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No schedule yet.</td></tr>'}</tbody></table></div>
@@ -1169,6 +1206,90 @@ function recapText() {
   }
   lines.push('— via LinedUpBetter');
   return lines.join('\n');
+}
+
+// ---- Matchups that matter (leverage) + who to stream for them
+const myFAs = () => state.model.freeAgents.filter(p => !isBanned(p.id));
+function vMatter() {
+  const { an, model: m } = state;
+  const list = memo('matter', () => A.matchupsThatMatter(m, an.my, state.settings.basis, myFAs()));
+  if (!list.length) return '';
+  const rows = list.map(x => `<div class="matter">
+      <div class="mt-week"><b>Wk ${x.period}</b><span class="muted small">${A.periodRange(m, x.period)}</span></div>
+      <div class="mt-opp">vs <button class="tlink" data-view="${x.opp.id}">${esc(x.opp.name)}</button><br><span class="small muted">win chance ${pct(x.wp)}</span></div>
+      <div class="mt-swing"><b>${signed(x.swing * 100)}%</b><span class="small muted">playoff odds: ${Math.round(x.ifWin * 100)}% if you win, ${Math.round(x.ifLoss * 100)}% if you lose</span></div>
+      <div class="mt-stream">${x.stream ? `<span class="small muted">stream</span> ${pCell(x.stream.fa)}<span class="small"><span class="up">${signed(x.stream.gain)}</span> · ${x.stream.games} g · for ${esc(x.stream.drop.name)}</span>` : '<span class="muted small">no stream beats your roster</span>'}</div>
+    </div>`).join('');
+  return `<section class="card"><h3>Matchups that matter <span class="r muted small">your remaining matchups that swing your playoff odds most</span></h3>${rows}
+    <p class="muted small">From 3,000 simulated seasons: how often you make the playoffs after winning vs losing each matchup. Stream = the free agent who'd add the most that week, and who they'd replace.</p></section>`;
+}
+
+// ---- Weekly slate
+function vSlate() {
+  const { an, model: m } = state;
+  const sched = A.teamSchedule(m, an.my.id, state.settings.basis).map(x => x.period).filter(p => p >= m.currentPeriod);
+  const periods = sched.length ? sched : [m.currentPeriod];
+  let period = state.slatePeriod ?? m.currentPeriod;
+  if (!periods.includes(period)) period = periods[0];
+  const i = periods.indexOf(period), prev = periods[i - 1], next = periods[i + 1];
+  const s = memo(`slate:${period}`, () => A.weeklySlate(m, an.my, period, state.settings.basis, myFAs()));
+  const nav = `<span class="wknav">
+      <button class="arrow" data-act="slwk" data-p="${prev ?? ''}" ${prev == null ? 'disabled' : ''} aria-label="Previous slate week">‹</button>
+      <span>Week ${period}</span>
+      <button class="arrow" data-act="slwk" data-p="${next ?? ''}" ${next == null ? 'disabled' : ''} aria-label="Next slate week">›</button></span>`;
+  const maxNba = 15;
+  const days = s.perDay.map(d => {
+    const date = A.spDate(m, d.sp);
+    const tag = d.nba <= 5 ? '<span class="nite light">light night</span>' : d.nba >= 11 ? '<span class="nite heavy">heavy night</span>' : '';
+    const best = d.adds[0];
+    const alts = d.adds.slice(1).map(x => `<button class="chip altadd" data-player="${x.fa.id}" title="${esc(x.fa.name)} · ${signed(x.gain)} · ${x.left} of ${x.week} left">${esc(x.fa.name)} <span class="up">${signed(x.gain)}</span></button>`).join('');
+    return `<div class="sday ${d.past ? 'past' : ''} ${d.sp === m.currentSP ? 'today' : ''}">
+      <div class="sd-date"><b>${A.fmtDow(date)}</b><span>${A.fmtMD(date)}</span></div>
+      <div class="sd-nba"><div class="nbabar"><i style="width:${(d.nba / maxNba * 100).toFixed(0)}%"></i></div><span>${d.nba} of ${maxNba} games ${tag}</span></div>
+      <div class="sd-vs">${d.past || !d.mine ? '<span class="muted small">played</span>' : `<b>${d.mine.starters.length}</b> <span class="muted">v</span> ${d.theirs ? d.theirs.starters.length : '–'}<span class="small muted"> starts</span>${d.mine.open ? `<br><span class="dopen" title="Empty lineup slots">${d.mine.open} open</span>` : ''}`}</div>
+      <div class="sd-add">${d.past ? '' : best ? `<span class="small muted">spend an add here</span>
+          <div class="addline">${pCell(best.fa)}<span class="small">${best.left} of ${best.week} left${best.b2b ? ' · B2B' : ''} · drop ${esc(best.drop.name)}</span><b class="up">${signed(best.gain)}</b></div>
+          ${alts ? `<div class="alts"><span class="small muted">if not them</span>${alts}</div>` : ''}`
+        : '<span class="muted small">no add beats your roster</span>'}</div>
+    </div>`;
+  }).join('');
+  const groups = s.groups.map(g => `<div class="tgroup"><b>${g.games}</b><div class="tlist2">${g.teams.map(t => `<span class="tm" title="${t.b2b ? t.b2b + ' back-to-back' + (t.b2b > 1 ? 's' : '') : ''}">${esc(t.abbrev)}${t.b2b ? '<sup>B2B</sup>' : ''}</span>`).join('')}</div></div>`).join('');
+  return `<section class="card"><h3>The weekly slate ${nav}<span class="r muted small">${A.periodRange(m, period)}${s.opp ? ` · vs <button class="tlink" data-view="${s.opp.id}">${esc(s.opp.name)}</button>` : ''}</span></h3>
+      <div class="slate-top"><div><span class="k">Games ${period === m.currentPeriod ? 'left' : 'this week'}</span><span class="v">${s.myGames} <small>you</small></span></div><div class="vsx">vs</div><div><span class="k">&nbsp;</span><span class="v">${s.oppGames ?? '–'} <small>opp</small></span></div></div>
+      <div class="sdays">${days}</div>
+      <p class="muted small">Starts = games your best lineup uses each night (open = empty slots to stream into). Spend an add here = the free agent who adds the most from that night to the end of the week, replacing one of your three least useful players. Banned players are never suggested.</p></section>
+    <section class="card"><h3>Games per NBA team <span class="r muted small">this week · B2B = back-to-back</span></h3><div class="tgroups">${groups}</div></section>`;
+}
+
+// ---- Injury report
+function vInjuries() {
+  const { an, model: m } = state;
+  const rows = memo('injuries', () => A.injuryReport(m, an.my, state.settings.basis));
+  const oppId = an.matchup && !an.matchup.bye ? an.matchup.opp.id : null;
+  const group = (title, list) => !list.length ? '' : `<section class="card"><h3>${title} <span class="r muted small">${list.length}</span></h3>
+    <div class="scrollx"><table class="injt"><thead><tr><th>Player</th><th>Team</th><th>Status</th><th class="num" title="Games missed of games left this season">Misses</th><th>Who benefits</th></tr></thead><tbody>
+    ${list.map(r => `<tr><td>${pCell(r.p)}</td>
+      <td>${r.owner ? `<button class="tlink" data-view="${r.owner.id}">${esc(r.owner.name)}</button>` : '<span class="badge b-wv">FREE AGENT</span>'}</td>
+      <td class="small">${esc([r.p.injuryType, A.isOut(r.p) ? A.returnLabel(r.p) : 'Day-to-day'].filter(Boolean).join(' · '))}</td>
+      <td class="num">${A.isOut(r.p) ? `${r.missed}<small class="muted">/${r.sched}</small>` : '<span class="muted">–</span>'}</td>
+      <td class="benef">${r.beneficiaries.length ? `<span class="small up">+${Math.round(r.bump * 100)}%</span> ${r.beneficiaries.map(b => `<button class="chip benchip ${b.owner ? '' : 'fa'}" data-player="${b.q.id}" title="${b.owner ? esc(b.owner.name) : 'Free agent: pickup idea'}">${esc(b.q.name)}${b.owner ? '' : ' <span>FA</span>'}</button>`).join('')}` : '<span class="muted small">–</span>'}</td></tr>`).join('')}
+    </tbody></table></div></section>`;
+  // Free agents who gain most from injuries: pickup ideas.
+  const pick = new Map();
+  for (const r of rows) for (const b of r.beneficiaries) if (!b.owner && !isBanned(b.q.id)) {
+    const x = pick.get(b.q.id) || { q: b.q, gain: 0, because: [] };
+    x.gain += b.gain; x.because.push(r.p.name);
+    pick.set(b.q.id, x);
+  }
+  const picks = [...pick.values()].sort((a, b) => b.gain - a.gain).slice(0, 6);
+  return `${picks.length ? `<section class="card"><h3>Injury pickups <span class="r muted small">free agents whose role grows while a teammate is out</span></h3>
+      ${picks.map(x => `<div class="pick">${pCell(x.q)}<div class="meta">${f1(val(x.q))}<small> proj/G</small><br><small>with ${esc(x.because.slice(0, 2).join(' & '))} out</small></div><div class="gain">+${f1(x.gain)}</div>${xBtn(x.q.id)}</div>`).join('')}
+      <p class="muted small">+ = extra fantasy points per game from the usage bump while those teammates are out (already in their projections).</p></section>` : ''}
+    ${group(`${esc(an.my.name)}`, rows.filter(r => r.mine))}
+    ${oppId != null ? group(`Your opponent: ${esc(an.matchup.opp.name)}`, rows.filter(r => r.owner?.id === oppId)) : ''}
+    ${group('Rest of your league', rows.filter(r => r.owner && !r.mine && r.owner.id !== oppId))}
+    ${group('Notable free agents', rows.filter(r => !r.owner))}
+    ${rows.length ? '' : '<div class="card empty"><h2>Clean bill of health</h2><p>No notable injuries in your league right now.</p></div>'}`;
 }
 
 function vWatchlist() {
@@ -1330,7 +1451,7 @@ function vBody() {
   if (state.tab === 'settings') return vSettings();
   if (state.error) return `<div class="card err empty"><h2>Couldn't load your league</h2><p>${esc(state.error)}</p><div class="row" style="justify-content:center"><button class="btn primary" data-act="refresh">Try again</button><button class="btn" data-tab="settings">Settings</button></div></div>`;
   if (!state.model) return `<div class="empty"><h2>LinedUp<em>Better</em></h2><p>Connect your ESPN league to get started.</p><div class="row" style="justify-content:center"><button class="btn primary" data-tab="settings">Connect league</button><button class="btn" data-act="demo">Try demo</button></div></div>`;
-  return { overview: vOverview, roster: vRoster, matchups: vMatchups, waivers: vWaivers, trade: vTrade, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
+  return { overview: vOverview, roster: vRoster, matchups: vMatchups, slate: vSlate, waivers: vWaivers, trade: vTrade, injuries: vInjuries, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
 }
 
 function render() {
@@ -1384,6 +1505,8 @@ document.addEventListener('click', async e => {
     await saveSettings(); render(); return;
   }
   if (act === 'home') { setView(starredTeam()); return; }
+  if (act === 'slwk') { if (t.dataset.p !== '') { state.slatePeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
+  if (act === 'trend') { state.trend.mode = t.dataset.v; state.keepScroll = true; render(); return; }
   if (act === 'wk') { if (t.dataset.p !== '') { state.boardPeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
   if (act === 'trade-clear') { state.trade.give = []; state.trade.get = []; state.keepScroll = true; render(); return; }
   if (act === 'target') { openFinder('get', +t.dataset.id); return; }
@@ -1469,7 +1592,7 @@ document.addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey || e.target.closest?.('input, textarea, select')) return;
   if (/^[1-9]$/.test(e.key) && TABS[+e.key - 1]) { setTab(TABS[+e.key - 1][0]); return; }
   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-    document.querySelector(`.arrow[aria-label="${e.key === 'ArrowLeft' ? 'Previous' : 'Next'} week"]:not([disabled])`)?.click();
+    document.querySelector(`.arrow[aria-label="${e.key === 'ArrowLeft' ? 'Previous' : 'Next'} week"]:not([disabled]), .arrow[aria-label="${e.key === 'ArrowLeft' ? 'Previous' : 'Next'} slate week"]:not([disabled])`)?.click();
     return;
   }
   if (e.key === 'r' || e.key === 'R') load(true);
@@ -1488,6 +1611,7 @@ document.addEventListener('change', async e => {
   }
   if (act === 'basis') { state.settings.basis = e.target.value; await saveSettings(); reanalyze(); render(); }
   if (act === 'inj') { state.wv.showInjured = e.target.checked; state.keepScroll = true; render(); }
+  if (act === 'under50') { state.trend.under50 = e.target.checked; state.keepScroll = true; render(); }
   if (act === 'adjust') { state.settings.adjust = e.target.checked; await saveSettings(); reanalyze(); render(); toast(e.target.checked ? 'Teammate usage + rest adjustments on' : 'Adjustments off: raw averages'); }
 });
 
