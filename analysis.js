@@ -1248,33 +1248,68 @@ export function trends(m, basis) {
 // ---- Player power rankings
 // Every player we know about (all rosters + top free agents), ranked several ways with
 // the league's scoring. Recency modes need a few games in the window.
+// Injuries: `rank` scores each window's FP/G × the share of the player's upcoming games
+// they're expected to play: the next two weeks for recent form, the rest of the season
+// for Overall and Rest of season. ESPN return dates decide when they're back,
+// day-to-day counts 80% this matchup (as in projections), out with no return date is
+// assumed out two weeks, out for season is zero. Total points is history, so it isn't
+// adjusted. `rawRank` keeps the injury-blind order.
 export const RANK_MODES = {
   season: 'Overall', l30: 'Last 30', l15: 'Last 15', l7: 'Last 7', ros: 'Rest of season', total: 'Total points',
 };
+export const RANK_HORIZON = { season: 'ros', l30: 'near', l15: 'near', l7: 'near', ros: 'ros', total: null };
 const RANK_MIN_GP = { season: 3, l30: 3, l15: 2, l7: 1, total: 1, ros: 0 };
+const NEAR_DAYS = 14;
 export function playerRankings(m, basis) {
   const owner = new Map(), pool = new Map();
   for (const t of m.teams) for (const p of t.roster) { owner.set(p.id, t); pool.set(p.id, p); }
   for (const p of m.poolFAs || m.freeAgents || []) if (!pool.has(p.id)) pool.set(p.id, p);
   const players = [...pool.values()];
+  const far = futureDays(m);
+  const near = Array.from({ length: NEAR_DAYS }, (_, i) => m.currentSP + i);
+  const healthy = { n: 0, s: 0, share: 1 };
+  const health = p => {
+    if (!isOut(p) && !isDTD(p)) return { near: healthy, ros: healthy, guess: false };
+    const back = isOut(p) && !p.outForSeason && !p.returnSP ? m.currentSP + NEAR_DAYS : null;
+    const plays = sp => (p.outForSeason ? 0 : back ? (sp >= back ? 1 : 0) : availableOn(m, p, sp) ? dtdFactor(m, p, sp) : 0);
+    const share = days => {
+      let n = 0, s = 0;
+      for (const sp of days) if (gameOn(m, p, sp)) { n++; s += plays(sp); }
+      return { n, s, share: n ? s / n : (isOut(p) ? 0 : 1) };
+    };
+    return { near: share(near), ros: share(far), guess: !!back };
+  };
   const stat = (p, mode) => {
     const s = p.stats || {};
-    if (mode === 'ros') return { v: value(p, basis), gp: s.season?.gp || 0 };
+    if (mode === 'ros') return p.outForSeason ? null : { v: value(p, basis), gp: s.season?.gp || 0 };
     if (mode === 'total') return s.season ? { v: s.season.avg * s.season.gp, gp: s.season.gp } : null;
     return s[mode] && Number.isFinite(s[mode].avg) ? { v: s[mode].avg, gp: s[mode].gp || 0 } : null;
   };
-  const rows = new Map(players.map(p => [p.id, { p, owner: owner.get(p.id) || null, vals: {}, gp: {}, rank: {}, pos: {} }]));
-  for (const mode of Object.keys(RANK_MODES)) {
-    const list = players.map(p => ({ p, x: stat(p, mode) }))
-      .filter(({ p, x }) => x && Number.isFinite(x.v) && x.gp >= RANK_MIN_GP[mode] && (mode !== 'ros' || !p.outForSeason))
-      .sort((a, b) => b.x.v - a.x.v);
+  const rows = new Map(players.map(p => [p.id, {
+    p, owner: owner.get(p.id) || null, health: health(p),
+    vals: {}, score: {}, gp: {}, rank: {}, rawRank: {}, pos: {}, rawPos: {},
+  }]));
+  const place = (list, rankKey, posKey) => {
     const posCount = {};
-    list.forEach(({ p, x }, i) => {
-      const r = rows.get(p.id);
-      r.vals[mode] = x.v; r.gp[mode] = x.gp; r.rank[mode] = i + 1;
-      const pos = p.pos || p.eligible?.[0] || '';
-      r.pos[mode] = `${pos}${(posCount[pos] = (posCount[pos] || 0) + 1)}`;
+    list.forEach(({ r, mode }, i) => {
+      r[rankKey][mode] = i + 1;
+      const pos = r.p.pos || r.p.eligible?.[0] || '';
+      r[posKey][mode] = `${pos}${(posCount[pos] = (posCount[pos] || 0) + 1)}`;
     });
+  };
+  for (const mode of Object.keys(RANK_MODES)) {
+    const hz = RANK_HORIZON[mode];
+    const list = [];
+    for (const p of players) {
+      const x = stat(p, mode);
+      if (!x || !Number.isFinite(x.v) || x.gp < RANK_MIN_GP[mode]) continue;
+      const r = rows.get(p.id);
+      r.vals[mode] = x.v; r.gp[mode] = x.gp;
+      r.score[mode] = hz ? x.v * r.health[hz].share : x.v;
+      list.push({ r, mode });
+    }
+    place(list.slice().sort((a, b) => b.r.vals[mode] - a.r.vals[mode]), 'rawRank', 'rawPos');
+    place(list.sort((a, b) => b.r.score[mode] - a.r.score[mode] || b.r.vals[mode] - a.r.vals[mode]), 'rank', 'pos');
   }
   for (const r of rows.values()) r.pre = r.p.espnRank || (r.p.adp ? Math.round(r.p.adp) : null);
   return [...rows.values()];

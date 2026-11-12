@@ -580,44 +580,69 @@ function vWaivers() {
 const getRanks = () => memo('ranks', () => A.playerRankings(state.model, state.settings.basis));
 function vPlayers() {
   const { an } = state;
-  const f = state.pr ||= { mode: 'season', pos: 'ALL', who: 'all', q: '', limit: 50 };
+  const f = state.pr ||= { mode: 'season', pos: 'ALL', who: 'all', q: '', limit: 50, inj: true };
+  const inj = f.inj !== false;
+  const RK = inj ? 'rank' : 'rawRank', PK = inj ? 'pos' : 'rawPos';
+  const hz = A.RANK_HORIZON[f.mode];
   const all = getRanks();
   const recency = ['l30', 'l15', 'l7'].includes(f.mode);
   const q = f.q.trim().toLowerCase();
-  let list = all.filter(r => r.rank[f.mode] != null
+  let list = all.filter(r => r[RK][f.mode] != null
     && (f.pos === 'ALL' || (r.p.eligible || []).includes(f.pos) || r.p.pos === f.pos)
     && (f.who === 'all' || (f.who === 'fa' ? !r.owner : f.who === 'mine' ? r.owner?.id === an.my.id : !!r.owner))
     && (!q || r.p.name.toLowerCase().includes(q)))
-    .sort((a, b) => a.rank[f.mode] - b.rank[f.mode]);
+    .sort((a, b) => a[RK][f.mode] - b[RK][f.mode]);
   const total = list.length;
   list = list.slice(0, f.limit);
-  // Movement: recent rank vs season rank; season rank vs preseason rank.
-  const move = r => (recency ? (r.rank.season != null ? r.rank.season - r.rank[f.mode] : null)
-    : f.mode === 'season' && r.pre ? r.pre - r.rank.season : null);
+  // Movement is form only (injury-blind ranks, so it isn't just the injury again):
+  // recent rank vs season rank; season rank vs preseason rank.
+  const move = r => (recency ? (r.rawRank.season != null ? r.rawRank.season - r.rawRank[f.mode] : null)
+    : f.mode === 'season' && r.pre ? r.pre - r.rawRank.season : null);
   const mv = n => (n == null ? '<td class="num muted">–</td>' : `<td class="num ${n >= 10 ? 'up' : n <= -10 ? 'down' : 'muted'}">${n > 0 ? '▲' + n : n < 0 ? '▼' + -n : '–'}</td>`);
-  const cell = (r, k) => `<td class="num ${k === f.mode ? 'sel' : ''}">${r.vals[k] == null ? '–' : k === 'total' ? f0(r.vals[k]) : f1(r.vals[k])}</td>`;
+  const hzText = (h = hz || 'ros') => (h === 'near' ? 'in the next 2 weeks' : 'for the rest of the season');
+  // Health: share of this window's horizon they're expected to play, and why.
+  const health = r => {
+    const p = r.p;
+    if (!A.isOut(p) && !A.isDTD(p)) return '<td class="num muted">–</td>';
+    const h = r.health[hz || 'ros'];
+    const pct = Math.round(h.share * 100);
+    const why = p.outForSeason ? 'season' : A.isDTD(p) ? 'day-to-day' : r.health.guess ? 'no date'
+      : p.returnDate ? 'back ' + A.fmtMD(new Date(p.returnDate + 'T12:00:00')) : '';
+    const tip = `${A.returnLabel(p) || 'Day-to-day'}. Expected to play ${h.n ? `${Number.isInteger(h.s) ? h.s : '~' + Math.round(h.s)} of ${h.n} games` : 'no scheduled games'} ${hzText()}${r.health.guess ? ' (no return date, so assumed out 2 weeks)' : ''}.`;
+    return `<td class="num ${pct < 70 ? 'down' : ''}" title="${esc(tip)}"><b>${pct}%</b><br><span class="small muted">${esc(why)}</span></td>`;
+  };
+  const cell = (r, k) => {
+    const v = r.vals[k];
+    if (v == null) return `<td class="num ${k === f.mode ? 'sel' : ''}">–</td>`;
+    const adj = inj && k === f.mode && hz && r.score[k] < v - 0.05;
+    return `<td class="num ${k === f.mode ? 'sel' : ''}">${k === 'total' ? f0(v) : f1(v)}${adj ? `<br><span class="small muted" title="FP/G × share of games expected to play: what the rank uses">adj ${f1(r.score[k])}</span>` : ''}</td>`;
+  };
   const rows = list.map(r => `<tr class="${r.owner?.id === an.my.id ? 'me' : ''}">
-      <td class="num rk"><b>${r.rank[f.mode]}</b>${f.pos !== 'ALL' ? `<br><span class="small muted">${esc(r.pos[f.mode] || '')}</span>` : ''}</td>
+      <td class="num rk"><b>${r[RK][f.mode]}</b>${f.pos !== 'ALL' ? `<br><span class="small muted">${esc(r[PK][f.mode] || '')}</span>` : ''}</td>
       ${mv(move(r))}
       <td>${pCell(r.p)}</td>
+      ${health(r)}
       <td>${r.owner ? `<button class="tlink small" data-view="${r.owner.id}">${esc(r.owner.name)}</button>` : `<span class="badge b-wv">${r.p.status === 'WAIVERS' ? 'W' : 'FA'}</span>`}</td>
       <td class="num muted">${r.gp[f.mode] ?? '–'}</td>
       ${cell(r, 'season')}${cell(r, 'l30')}${cell(r, 'l15')}${cell(r, 'l7')}${cell(r, 'ros')}
       <td class="num muted">${r.p.owned != null ? Math.round(r.p.owned) + '%' : '–'}</td></tr>`).join('');
   const chip = (act, v, text, on) => `<button class="chip ${on ? 'on' : ''}" data-act="${act}" data-v="${v}">${text}</button>`;
   const moveHead = recency ? 'vs season' : f.mode === 'season' ? 'vs preseason' : '';
-  return `<section class="card"><h3>Player rankings <span class="r muted small">${total} players · ${esc(A.RANK_MODES[f.mode])} · your league's scoring</span></h3>
-    <div class="chips">${Object.entries(A.RANK_MODES).map(([k, t]) => chip('prmode', k, t, f.mode === k)).join('')}</div>
+  return `<section class="card"><h3>Player rankings <span class="r muted small">${total} players · ${esc(A.RANK_MODES[f.mode])} · injuries ${inj && hz ? 'counted' : 'ignored'} · your league's scoring</span></h3>
+    <div class="chips">${Object.entries(A.RANK_MODES).map(([k, t]) => chip('prmode', k, t, f.mode === k)).join('')}
+      <span class="chipsep"></span><button class="chip ${inj ? 'on' : ''}" data-act="prinj" title="Rank by FP/G × share of upcoming games each player is expected to play (ESPN return dates)">Count injuries</button></div>
     <div class="chips">${['ALL', 'PG', 'SG', 'SF', 'PF', 'C'].map(p => chip('prpos', p, p, f.pos === p)).join('')}
       <span class="chipsep"></span>${[['all', 'Everyone'], ['fa', 'Free agents'], ['rostered', 'Rostered'], ['mine', 'My team']].map(([k, t]) => chip('prwho', k, t, f.who === k)).join('')}
       <input id="prq" class="prsearch" data-act="prq" placeholder="Search players…" value="${esc(f.q)}" autocomplete="off" spellcheck="false"></div>
     <div class="scrollx"><table class="ranks"><thead><tr>
-      <th class="num">#</th><th class="num" title="${recency ? 'Rank in this window vs season rank (▲ = rising)' : f.mode === 'season' ? 'Season rank vs preseason rank (ESPN rank / draft position)' : ''}">${moveHead || ''}</th>
-      <th>Player</th><th>Owner</th><th class="num" title="Games played in this window">GP</th>
-      <th class="num">Season</th><th class="num">L30</th><th class="num">L15</th><th class="num">L7</th><th class="num" title="Rest-of-season projection per game (${esc(A.BASIS[state.settings.basis])}, with injuries and usage)">ROS</th><th class="num" title="Rostered across ESPN leagues">Rost.</th>
-    </tr></thead><tbody>${rows || '<tr><td colspan="11" class="muted">Nobody matches.</td></tr>'}</tbody></table></div>
+      <th class="num">#</th><th class="num" title="${recency ? 'Form: per-game rank in this window vs season (▲ = rising), injuries aside' : f.mode === 'season' ? 'Season per-game rank vs preseason rank (ESPN rank / draft position), injuries aside' : ''}">${moveHead || ''}</th>
+      <th>Player</th><th class="num" title="Share of games expected to play ${hzText()} (ESPN return dates)">Health</th><th>Owner</th><th class="num" title="Games played in this window">GP</th>
+      <th class="num">Season</th><th class="num">L30</th><th class="num">L15</th><th class="num">L7</th><th class="num" title="Rest-of-season projection per game when playing (${esc(A.BASIS[state.settings.basis])}, with teammate usage)">ROS</th><th class="num" title="Rostered across ESPN leagues">Rost.</th>
+    </tr></thead><tbody>${rows || '<tr><td colspan="12" class="muted">Nobody matches.</td></tr>'}</tbody></table></div>
     ${total > list.length ? `<button class="btn morebtn" data-act="prmore">Show ${Math.min(50, total - list.length)} more <small>(${total - list.length} left)</small></button>` : ''}
-    <p class="muted small">Ranked by fantasy points per game in each window (Total points: season total). Recency windows need a few games (Last 7: 1+, Last 15: 2+, Last 30/Overall: 3+). Rest of season ranks the projection the app uses everywhere else, including injuries and teammate usage. Your players are highlighted.</p></section>`;
+    <p class="muted small">Ranked by fantasy points per game in each window (Total points: season total). ${inj
+      ? 'Injuries counted: each rank uses FP/G × the share of games the player is expected to play, over the next 2 weeks for Last 30/15/7 and the rest of the season for Overall and Rest of season. ESPN return dates decide when they’re back; day-to-day counts 80% this matchup; out with no return date is assumed out 2 weeks; out for season ranks last. Averages shown are real; “adj” is what the rank uses. Total points is history, so it isn’t adjusted.'
+      : 'Injuries ignored: ranks are per game when playing.'} Recency windows need a few games (Last 7: 1+, Last 15: 2+, Last 30/Overall: 3+). Your players are highlighted.</p></section>`;
 }
 
 // ---- Risers & fallers: in-season rank vs preseason rank
@@ -1359,9 +1384,10 @@ function vWatchlist() {
 function vRanks(p) {
   const r = getRanks().find(x => x.p.id === p.id);
   if (!r) return '';
-  const bits = ['season', 'l15', 'l7', 'ros'].filter(k => r.rank[k] != null)
-    .map(k => `<span><small>${k === 'season' ? 'Overall' : A.RANK_MODES[k]}</small><b>#${r.rank[k]}</b></span>`).join('');
-  return bits ? `<div class="rankrow" title="Player rankings with your league's scoring">${bits}</div>` : '';
+  const RK = state.pr?.inj === false ? 'rawRank' : 'rank';
+  const bits = ['season', 'l15', 'l7', 'ros'].filter(k => r[RK][k] != null)
+    .map(k => `<span><small>${k === 'season' ? 'Overall' : A.RANK_MODES[k]}</small><b>#${r[RK][k]}</b></span>`).join('');
+  return bits ? `<div class="rankrow" title="Player rankings with your league's scoring${RK === 'rank' ? ', injuries counted' : ''}">${bits}</div>` : '';
 }
 
 // How trade value is built for a player: reputation vs current form.
@@ -1563,6 +1589,7 @@ document.addEventListener('click', async e => {
     state.pr[{ prmode: 'mode', prpos: 'pos', prwho: 'who' }[act]] = t.dataset.v;
     state.pr.limit = 50; state.keepScroll = true; render(); return;
   }
+  if (act === 'prinj') { state.pr.inj = state.pr.inj === false; state.pr.limit = 50; state.keepScroll = true; render(); return; }
   if (act === 'prmore') { state.pr.limit += 50; state.keepScroll = true; render(); return; }
   if (act === 'slwk') { if (t.dataset.p !== '') { state.slatePeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
   if (act === 'trend') { state.trend.mode = t.dataset.v; state.keepScroll = true; render(); return; }
