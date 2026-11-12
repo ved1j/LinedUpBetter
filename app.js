@@ -19,7 +19,7 @@ document.body.classList.toggle('full', full);
 
 const defaultSeason = () => { const d = new Date(); return d.getMonth() >= 7 ? d.getFullYear() + 1 : d.getFullYear(); };
 const CACHE_MS = 60 * 1000; // short: live scores and lineup changes on ESPN show up quickly
-const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['slate', 'Slate'], ['waivers', 'Waivers'], ['trade', 'Trade'], ['injuries', 'Injuries'], ['playoffs', 'Playoffs'], ['league', 'League'], ['watchlist', 'Watchlist'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['slate', 'Slate'], ['waivers', 'Waivers'], ['players', 'Players'], ['trade', 'Trade'], ['injuries', 'Injuries'], ['playoffs', 'Playoffs'], ['league', 'League'], ['watchlist', 'Watchlist'], ['settings', 'Settings']];
 
 const state = {
   settings: { leagueId: '', season: defaultSeason(), teamId: null, basis: 'smart', demo: false, starred: {} },
@@ -574,6 +574,50 @@ function vWaivers() {
     ${vHidden()}
   </section>
   ${vTrends()}`;
+}
+
+// ---- Player power rankings
+const getRanks = () => memo('ranks', () => A.playerRankings(state.model, state.settings.basis));
+function vPlayers() {
+  const { an } = state;
+  const f = state.pr ||= { mode: 'season', pos: 'ALL', who: 'all', q: '', limit: 50 };
+  const all = getRanks();
+  const recency = ['l30', 'l15', 'l7'].includes(f.mode);
+  const q = f.q.trim().toLowerCase();
+  let list = all.filter(r => r.rank[f.mode] != null
+    && (f.pos === 'ALL' || (r.p.eligible || []).includes(f.pos) || r.p.pos === f.pos)
+    && (f.who === 'all' || (f.who === 'fa' ? !r.owner : f.who === 'mine' ? r.owner?.id === an.my.id : !!r.owner))
+    && (!q || r.p.name.toLowerCase().includes(q)))
+    .sort((a, b) => a.rank[f.mode] - b.rank[f.mode]);
+  const total = list.length;
+  list = list.slice(0, f.limit);
+  // Movement: recent rank vs season rank; season rank vs preseason rank.
+  const move = r => (recency ? (r.rank.season != null ? r.rank.season - r.rank[f.mode] : null)
+    : f.mode === 'season' && r.pre ? r.pre - r.rank.season : null);
+  const mv = n => (n == null ? '<td class="num muted">–</td>' : `<td class="num ${n >= 10 ? 'up' : n <= -10 ? 'down' : 'muted'}">${n > 0 ? '▲' + n : n < 0 ? '▼' + -n : '–'}</td>`);
+  const cell = (r, k) => `<td class="num ${k === f.mode ? 'sel' : ''}">${r.vals[k] == null ? '–' : k === 'total' ? f0(r.vals[k]) : f1(r.vals[k])}</td>`;
+  const rows = list.map(r => `<tr class="${r.owner?.id === an.my.id ? 'me' : ''}">
+      <td class="num rk"><b>${r.rank[f.mode]}</b>${f.pos !== 'ALL' ? `<br><span class="small muted">${esc(r.pos[f.mode] || '')}</span>` : ''}</td>
+      ${mv(move(r))}
+      <td>${pCell(r.p)}</td>
+      <td>${r.owner ? `<button class="tlink small" data-view="${r.owner.id}">${esc(r.owner.name)}</button>` : `<span class="badge b-wv">${r.p.status === 'WAIVERS' ? 'W' : 'FA'}</span>`}</td>
+      <td class="num muted">${r.gp[f.mode] ?? '–'}</td>
+      ${cell(r, 'season')}${cell(r, 'l30')}${cell(r, 'l15')}${cell(r, 'l7')}${cell(r, 'ros')}
+      <td class="num muted">${r.p.owned != null ? Math.round(r.p.owned) + '%' : '–'}</td></tr>`).join('');
+  const chip = (act, v, text, on) => `<button class="chip ${on ? 'on' : ''}" data-act="${act}" data-v="${v}">${text}</button>`;
+  const moveHead = recency ? 'vs season' : f.mode === 'season' ? 'vs preseason' : '';
+  return `<section class="card"><h3>Player rankings <span class="r muted small">${total} players · ${esc(A.RANK_MODES[f.mode])} · your league's scoring</span></h3>
+    <div class="chips">${Object.entries(A.RANK_MODES).map(([k, t]) => chip('prmode', k, t, f.mode === k)).join('')}</div>
+    <div class="chips">${['ALL', 'PG', 'SG', 'SF', 'PF', 'C'].map(p => chip('prpos', p, p, f.pos === p)).join('')}
+      <span class="chipsep"></span>${[['all', 'Everyone'], ['fa', 'Free agents'], ['rostered', 'Rostered'], ['mine', 'My team']].map(([k, t]) => chip('prwho', k, t, f.who === k)).join('')}
+      <input id="prq" class="prsearch" data-act="prq" placeholder="Search players…" value="${esc(f.q)}" autocomplete="off" spellcheck="false"></div>
+    <div class="scrollx"><table class="ranks"><thead><tr>
+      <th class="num">#</th><th class="num" title="${recency ? 'Rank in this window vs season rank (▲ = rising)' : f.mode === 'season' ? 'Season rank vs preseason rank (ESPN rank / draft position)' : ''}">${moveHead || ''}</th>
+      <th>Player</th><th>Owner</th><th class="num" title="Games played in this window">GP</th>
+      <th class="num">Season</th><th class="num">L30</th><th class="num">L15</th><th class="num">L7</th><th class="num" title="Rest-of-season projection per game (${esc(A.BASIS[state.settings.basis])}, with injuries and usage)">ROS</th><th class="num" title="Rostered across ESPN leagues">Rost.</th>
+    </tr></thead><tbody>${rows || '<tr><td colspan="11" class="muted">Nobody matches.</td></tr>'}</tbody></table></div>
+    ${total > list.length ? `<button class="btn morebtn" data-act="prmore">Show ${Math.min(50, total - list.length)} more <small>(${total - list.length} left)</small></button>` : ''}
+    <p class="muted small">Ranked by fantasy points per game in each window (Total points: season total). Recency windows need a few games (Last 7: 1+, Last 15: 2+, Last 30/Overall: 3+). Rest of season ranks the projection the app uses everywhere else, including injuries and teammate usage. Your players are highlighted.</p></section>`;
 }
 
 // ---- Risers & fallers: in-season rank vs preseason rank
@@ -1311,6 +1355,15 @@ function vWatchlist() {
   </section>`;
 }
 
+// Where a player ranks in each window (from the Players tab).
+function vRanks(p) {
+  const r = getRanks().find(x => x.p.id === p.id);
+  if (!r) return '';
+  const bits = ['season', 'l15', 'l7', 'ros'].filter(k => r.rank[k] != null)
+    .map(k => `<span><small>${k === 'season' ? 'Overall' : A.RANK_MODES[k]}</small><b>#${r.rank[k]}</b></span>`).join('');
+  return bits ? `<div class="rankrow" title="Player rankings with your league's scoring">${bits}</div>` : '';
+}
+
 // How trade value is built for a player: reputation vs current form.
 function vMarket(p) {
   const x = A.marketParts(state.model, p, state.settings.basis);
@@ -1379,6 +1432,7 @@ function vDrawer() {
       ${ownerId === state.an.my.id ? `<button class="btn ${isLocked(p.id) ? 'warnbtn' : ''}" data-act="plock" title="Untouchable players are never offered in trade ideas or the finder">${isLocked(p.id) ? '🔒 Untouchable' : '🔓 Mark untouchable'}</button>
         <button class="btn" data-act="faway" data-id="${p.id}">⇄ Shop this player</button>` : ''}
     </div>
+    ${vRanks(p)}
     ${vWorth(p, ownerId)}
     ${vUsage(p)}
     ${vMarket(p)}
@@ -1451,7 +1505,7 @@ function vBody() {
   if (state.tab === 'settings') return vSettings();
   if (state.error) return `<div class="card err empty"><h2>Couldn't load your league</h2><p>${esc(state.error)}</p><div class="row" style="justify-content:center"><button class="btn primary" data-act="refresh">Try again</button><button class="btn" data-tab="settings">Settings</button></div></div>`;
   if (!state.model) return `<div class="empty"><h2>LinedUp<em>Better</em></h2><p>Connect your ESPN league to get started.</p><div class="row" style="justify-content:center"><button class="btn primary" data-tab="settings">Connect league</button><button class="btn" data-act="demo">Try demo</button></div></div>`;
-  return { overview: vOverview, roster: vRoster, matchups: vMatchups, slate: vSlate, waivers: vWaivers, trade: vTrade, injuries: vInjuries, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
+  return { overview: vOverview, roster: vRoster, matchups: vMatchups, slate: vSlate, waivers: vWaivers, players: vPlayers, trade: vTrade, injuries: vInjuries, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
 }
 
 function render() {
@@ -1505,6 +1559,11 @@ document.addEventListener('click', async e => {
     await saveSettings(); render(); return;
   }
   if (act === 'home') { setView(starredTeam()); return; }
+  if (act === 'prmode' || act === 'prpos' || act === 'prwho') {
+    state.pr[{ prmode: 'mode', prpos: 'pos', prwho: 'who' }[act]] = t.dataset.v;
+    state.pr.limit = 50; state.keepScroll = true; render(); return;
+  }
+  if (act === 'prmore') { state.pr.limit += 50; state.keepScroll = true; render(); return; }
   if (act === 'slwk') { if (t.dataset.p !== '') { state.slatePeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
   if (act === 'trend') { state.trend.mode = t.dataset.v; state.keepScroll = true; render(); return; }
   if (act === 'wk') { if (t.dataset.p !== '') { state.boardPeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
@@ -1578,6 +1637,18 @@ function setView(id) {
   state.viewId = id; state.openPlayer = null; state.trade.give = []; state.boardPeriod = null; state.finder = null;
   reanalyze(); render();
 }
+let prTimer;
+document.addEventListener('input', e => {
+  if (e.target.dataset.act !== 'prq') return;
+  state.pr.q = e.target.value; state.pr.limit = 50;
+  clearTimeout(prTimer);
+  prTimer = setTimeout(() => {
+    const pos = e.target.selectionStart;
+    state.keepScroll = true; render();
+    const box = document.getElementById('prq');
+    if (box) { box.focus(); box.setSelectionRange(pos, pos); }
+  }, 180);
+});
 let noteTimer;
 document.addEventListener('input', e => {
   if (e.target.dataset.act !== 'pnote') return;

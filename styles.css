@@ -537,3 +537,12 @@ tr.tier td { font-family: var(--display); font-weight: 700; font-size: 10.5px; l
 .chip.benchip { font-family: var(--body); font-weight: 500; letter-spacing: 0; font-size: 11.5px; padding: 2px 8px; margin: 2px 2px 0 0; }
 .chip.benchip.fa { border-color: var(--volt); color: var(--volt); }
 .chip.benchip span { font-family: var(--display); font-weight: 700; font-size: 9.5px; letter-spacing: .1em; }
+
+/* ---------- player rankings */
+.prsearch { width: 180px; margin-left: auto; padding: 5px 10px; font-size: 12.5px; }
+.ranks td.rk b { font-family: var(--display); font-weight: 800; font-size: 15px; }
+.ranks td.sel { color: var(--volt); font-weight: 700; }
+.rankrow { display: flex; gap: 6px; }
+.rankrow span { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 6px 4px; border-radius: 7px; background: var(--surface-2); }
+.rankrow small { font-family: var(--display); font-weight: 600; font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.rankrow b { font-family: var(--display); font-weight: 800; font-size: 17px; }

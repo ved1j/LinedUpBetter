@@ -1244,3 +1244,38 @@ export function trends(m, basis) {
       avg: p.stats.season.avg, vsProj: p.stats.proj ? p.stats.season.avg - p.stats.proj.avg : null };
   }).filter(r => r.pre);
 }
+
+// ---- Player power rankings
+// Every player we know about (all rosters + top free agents), ranked several ways with
+// the league's scoring. Recency modes need a few games in the window.
+export const RANK_MODES = {
+  season: 'Overall', l30: 'Last 30', l15: 'Last 15', l7: 'Last 7', ros: 'Rest of season', total: 'Total points',
+};
+const RANK_MIN_GP = { season: 3, l30: 3, l15: 2, l7: 1, total: 1, ros: 0 };
+export function playerRankings(m, basis) {
+  const owner = new Map(), pool = new Map();
+  for (const t of m.teams) for (const p of t.roster) { owner.set(p.id, t); pool.set(p.id, p); }
+  for (const p of m.poolFAs || m.freeAgents || []) if (!pool.has(p.id)) pool.set(p.id, p);
+  const players = [...pool.values()];
+  const stat = (p, mode) => {
+    const s = p.stats || {};
+    if (mode === 'ros') return { v: value(p, basis), gp: s.season?.gp || 0 };
+    if (mode === 'total') return s.season ? { v: s.season.avg * s.season.gp, gp: s.season.gp } : null;
+    return s[mode] && Number.isFinite(s[mode].avg) ? { v: s[mode].avg, gp: s[mode].gp || 0 } : null;
+  };
+  const rows = new Map(players.map(p => [p.id, { p, owner: owner.get(p.id) || null, vals: {}, gp: {}, rank: {}, pos: {} }]));
+  for (const mode of Object.keys(RANK_MODES)) {
+    const list = players.map(p => ({ p, x: stat(p, mode) }))
+      .filter(({ p, x }) => x && Number.isFinite(x.v) && x.gp >= RANK_MIN_GP[mode] && (mode !== 'ros' || !p.outForSeason))
+      .sort((a, b) => b.x.v - a.x.v);
+    const posCount = {};
+    list.forEach(({ p, x }, i) => {
+      const r = rows.get(p.id);
+      r.vals[mode] = x.v; r.gp[mode] = x.gp; r.rank[mode] = i + 1;
+      const pos = p.pos || p.eligible?.[0] || '';
+      r.pos[mode] = `${pos}${(posCount[pos] = (posCount[pos] || 0) + 1)}`;
+    });
+  }
+  for (const r of rows.values()) r.pre = r.p.espnRank || (r.p.adp ? Math.round(r.p.adp) : null);
+  return [...rows.values()];
+}
