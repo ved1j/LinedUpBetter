@@ -1346,6 +1346,9 @@ function vMatchups() {
   const future = sched.filter(x => !x.done && x.period <= m.regularPeriods);
   const expWins = future.reduce((a, x) => a + (x.winProb ?? 0), 0);
   const projW = an.my.wins + expWins, projL = an.my.losses + future.filter(x => x.opp).length - expWins;
+  // Same games, each counted for whoever's favored (what the Win % column suggests).
+  const favW = an.my.wins + future.filter(x => x.opp && x.winProb >= 0.5).length;
+  const favL = an.my.losses + future.filter(x => x.opp && x.winProb < 0.5).length;
   const rows = sched.map(x => {
     const cur = x.period === m.currentPeriod;
     const po = x.period > m.regularPeriods;
@@ -1364,9 +1367,9 @@ function vMatchups() {
       <div class="board-list">${live || '<p class="muted">No matchups this week.</p>'}</div></section>
     ${vMatter()}
     ${vBreakdown()}
-    <section class="card"><h3>${esc(an.my.name)} · schedule & predictions <span class="r muted small">projected record <b>${Math.round(projW)}-${Math.round(projL)}</b></span></h3>
+    <section class="card"><h3>${esc(an.my.name)} · schedule & predictions <span class="r muted small"><span title="Expected record: your wins so far plus the win chances of the games left added up (a 90% game counts 0.9 wins), so a few upsets are built in">projected record <b>${Math.round(projW)}-${Math.round(projL)}</b></span> · <span title="Every game left counted for whoever's favored (Win % of 50 or more): the best-case read of the Win % column">${favW}-${favL} if every favorite wins</span></span></h3>
       <div class="scrollx"><table><thead><tr><th>Week</th><th>Opponent</th><th class="num">Score / Proj</th><th class="num">Win %</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No schedule yet.</td></tr>'}</tbody></table></div>
-      <p class="muted small">Future weeks are projected with each team's current roster and NBA schedule, using ${esc(A.BASIS[state.settings.basis])} values and this league's scoring.</p></section>`;
+      <p class="muted small">Future weeks are projected with each team's current roster and NBA schedule, using ${esc(A.BASIS[state.settings.basis])} values and this league's scoring. A team with an open roster spot is assumed to pick up the best free agent once adds reset next week. Projected record adds up the win chances (a 90% game counts 0.9 wins), so it builds in a few upsets; "if every favorite wins" counts each game for the favorite.</p></section>`;
 }
 
 // Where a projection comes from: every player's projected starts and points for a week.
@@ -1392,6 +1395,7 @@ function vBreakdown() {
       const notes = [];
       if (r.bench) notes.push(`<span class="muted">sits ${r.bench}</span>`);
       if (r.out) notes.push(`<span class="down" title="${esc(A.returnLabel(r.p))}">out ${r.out}</span>`);
+      if (r.p.fill) notes.push('<span class="muted" title="Open roster spot: assumed pickup of the best free agent once adds reset">assumed pickup</span>');
       return `<tr class="${r.g ? '' : 'dim'}"><td>${pCell(r.p)}</td><td class="num">${r.g}<small class="muted">/${r.avail + r.out}</small></td><td class="small">${notes.join(' · ')}</td><td class="num"><b>${f0(r.pts)}</b></td></tr>`;
     }).join('');
     const idle = bd.rows.filter(r => !r.avail && !r.out && !r.g).map(r => esc(r.p.name)).join(', ');
@@ -1572,7 +1576,7 @@ function vWorth(p, ownerId) {
     pts = ctx.S(A.applyTrade(my.roster, [], [p], state.settings.basis).after, my) - ctx.myBase;
     label = `Adds to ${esc(my.name)}`;
   }
-  return `<div class="worth" title="Projected points over the ${horizon()} (bye weeks don't count), with ${ownerId === my.id ? 'vs without' : 'after adding (dropping your least useful player)'} this player">
+  return `<div class="worth" title="Projected points over the ${horizon()} (bye weeks don't count; an open roster spot is refilled from free agents from next week), with ${ownerId === my.id ? 'vs without' : 'after adding (dropping your least useful player)'} this player">
     <span>${label}</span><b class="${pts > 0 ? 'up' : 'muted'}">${signed(pts)}</b><small>pts rest of season</small></div>`;
 }
 

@@ -228,6 +228,8 @@ export function fillLineup(players, slots, key = slots.join(',')) {
 // `w` (a team's dayWeights) scales each day's points by how much it counts for that
 // team: 0 on bye weeks, so those days are skipped entirely.
 export function projectDays(m, roster, sps, basis, track = false, w = null) {
+  const fills = openSpotFills(m, roster, sps, basis);
+  if (fills.length) roster = [...roster, ...fills];
   const slots = startingSlots(m);
   const slotsKey = slots.join(',');
   const now = Date.now();
@@ -241,7 +243,7 @@ export function projectDays(m, roster, sps, basis, track = false, w = null) {
     return {
       p, v, games: m.proTeams[p.proTeamId]?.games || {},
       backSP: !out ? 0 : p.outForSeason || !p.returnSP ? Infinity : p.returnSP,
-      dtd: isDTD(p), star: adjustments.rest && v >= REST_STAR,
+      dtd: isDTD(p), star: adjustments.rest && v >= REST_STAR, join: p.joinSP || 0,
       team: p.proTeamId, me: u && p.proTeamId ? u.own.get(p.id) : null,
     };
   });
@@ -257,6 +259,7 @@ export function projectDays(m, roster, sps, basis, track = false, w = null) {
     for (const x of info) {
       const g = x.games[sp];
       if (!g || (isToday && g.start && g.start <= now)) continue; // no game, or already tipped off
+      if (sp < x.join) continue; // assumed pickup not on the team yet
       if (sp < x.backSP) { if (track) players.get(x.p).out++; continue; }
       let v = x.v;
       if (x.dtd && inCur) v *= 0.8;
@@ -289,6 +292,47 @@ export function projectDays(m, roster, sps, basis, track = false, w = null) {
     });
   }
   return { total, games, days, players, slotPts };
+}
+
+// Open roster spots: a roster with fewer players than the league's roster spots (IR
+// aside) is assumed to fill them with the best available free agents (by Proj/G, never
+// one you've banned) from the start of the next matchup, once adds reset, so future
+// weeks don't project an empty spot forever. This week stays as it is. The pickup is
+// marked `fill` (shown as an assumed pickup in breakdowns).
+const capMemo = new WeakMap(), fillMemo = new WeakMap();
+export function rosterSpots(m) {
+  if (!capMemo.has(m)) {
+    let n = 0;
+    for (const [k, c] of Object.entries(m.slotCounts || {})) if (+k <= 12) n += c;
+    capMemo.set(m, n);
+  }
+  return capMemo.get(m);
+}
+export const openSpots = (m, roster) => Math.max(0, rosterSpots(m) - roster.filter(p => p.slot !== 13).length);
+export const fillStart = m => (m.periods[m.currentPeriod + 1] || [])[0] || null;
+export function openSpotFills(m, roster, sps, basis) {
+  const cap = rosterSpots(m);
+  if (!cap) return [];
+  let n = 0;
+  for (const p of roster) if (p.slot !== 13) n++;
+  if (n >= cap) return [];
+  const join = fillStart(m);
+  if (!join) return [];
+  let last = 0;
+  for (const sp of sps) if (sp > last) last = sp;
+  if (last < join) return [];
+  const have = new Set(roster.map(p => p.id));
+  let byKey = fillMemo.get(m);
+  if (!byKey) fillMemo.set(m, byKey = new Map());
+  const out = [];
+  for (const p of faPool(m, basis)) {
+    if (have.has(p.id) || m.banned?.has(p.id)) continue;
+    const k = `${p.id}:${join}`;
+    if (!byKey.has(k)) byKey.set(k, { ...p, slot: 12, joinSP: join, fill: true });
+    out.push(byKey.get(k));
+    if (n + out.length >= cap) break;
+  }
+  return out;
 }
 
 // Evenly spaced subset of days (for season-long simulations), with the factor that
@@ -846,6 +890,14 @@ export function analyze(m, basis = 'smart') {
   // exactly what lineupCheck decides; warn separately only when it can't run.
   if (!lc && !off) for (const p of my.roster) {
     if (!availableOn(m, p, m.currentSP) && p.slot != null && p.slot < 12) note('bad', 'Lineup', `${p.name} is out and starting`, `${returnLabel(p)}. Swap in a healthy bench player before lock.`);
+  }
+  const openSp = openSpots(m, my.roster);
+  if (openSp) {
+    const next = fillStart(m);
+    const fills = next ? openSpotFills(m, my.roster, [next], basis) : [];
+    const noAdds = m.acqLimit > 0 && (my.acq?.[m.currentPeriod] || 0) >= m.acqLimit;
+    note(noAdds ? 'info' : 'warn', 'Roster', `${openSp} open roster spot${openSp > 1 ? 's' : ''}`,
+      (noAdds ? 'No adds left this week. ' : 'Free points: add someone. ') + (fills.length ? `From next week, projections assume you pick up ${fills.map(p => p.name).join(', ')} (best free agent${fills.length > 1 ? 's' : ''}).` : ''));
   }
   const irSlots = m.slotCounts?.[13] || 0;
   const inIR = my.roster.filter(p => p.slot === 13);
