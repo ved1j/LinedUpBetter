@@ -78,7 +78,7 @@ function toast(text) {
 // Memoize expensive season-long calculations until the data, projection basis or
 // viewed team changes.
 function memo(name, fn) {
-  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${state.pv || 0}`;
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${playoffsOn()}:${state.pv || 0}`;
   const hit = state.calc[name];
   if (hit?.key === key) return hit.v;
   const v = fn();
@@ -88,7 +88,7 @@ function memo(name, fn) {
 const getNeeds = () => memo('needs', () => A.teamNeeds(state.model, state.settings.basis));
 const getCtx = () => memo('ctx', () => {
   const ctx = A.seasonContext(state.model, state.settings.basis);
-  return { ...ctx, myBase: ctx.S(state.an.my.roster) };
+  return { ...ctx, myBase: ctx.S(state.an.my.roster, state.an.my) };
 });
 
 function badge(p) {
@@ -262,11 +262,14 @@ async function load(force = false) {
   render();
 }
 const adjustOn = () => state.settings.adjust !== false;
+const playoffsOn = () => state.settings.playoffs !== false;
+// What season-long numbers cover, for labels.
+const horizon = () => (playoffsOn() ? 'rest of the season + playoffs' : 'rest of the regular season');
 function reanalyze() {
   const m = state.model;
   if (!m) { state.an = null; return; }
   m.myTeamId = state.viewId;
-  A.setAdjustments({ usage: adjustOn(), rest: adjustOn() });
+  A.setAdjustments({ usage: adjustOn(), rest: adjustOn(), playoffs: playoffsOn() });
   // Players you've X'd out never show up in waiver suggestions, streaming plans or stash
   // lists (but still count as teammates for usage and as trade fill-ins).
   m.banned = bannedSet();
@@ -557,10 +560,10 @@ function vWaivers() {
         ${th('v', 'Proj/G', 'Projected FP per game: ' + A.BASIS[state.settings.basis])}
         ${th('gl', 'GL', 'Games left this week')}
         ${th('week', 'Wk +FP', 'Projected points gained this week if you swap in for your drop candidate (accounts for open lineup slots)')}
-        ${th('ros', 'ROS +', 'Projected points gained over the rest of the season (incl. playoffs) if swapped in for your drop candidate')}
+        ${th('ros', 'ROS +', 'Projected points gained over the ' + horizon() + ' (bye weeks don\'t count) if swapped in for your drop candidate')}
         ${th('next', 'Next G', 'Games next matchup')}
         ${th('trend', 'Δ L15', 'Last 15 days avg minus season avg')}
-        ${th('po', 'PO G', 'Games during fantasy playoffs')}
+        ${th('po', 'PO G', playoffsOn() ? 'Games during fantasy playoffs that count for you (a likely first-round bye counts for little)' : 'Fantasy playoffs are switched off in Settings')}
         ${th('own', '% Own', 'Rostered % and change — sort to find trending adds')}
         ${sps.map(sp => {
           const d = A.spDate(m, sp);
@@ -681,8 +684,10 @@ function vHidden() {
 function vLineupCard() {
   const { an, model: m } = state;
   const lc = an.lineup;
-  if (!lc) return '';
   const today = A.fmtDow(A.spDate(m, m.currentSP)) + ' ' + A.fmtMD(A.spDate(m, m.currentSP));
+  if (an.off) return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today}</span></h3>
+      <p class="okline">${esc(an.off.title)}: ${esc(an.off.detail)}</p></section>`;
+  if (!lc) return '';
   const asOf = m.fetchedAt ? `ESPN lineup as of ${new Date(m.fetchedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : 'ESPN lineup';
   if (lc.gain < 1 || !lc.start.length) {
     return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today} · ${asOf}</span></h3>
@@ -723,12 +728,20 @@ function vPlayoffs() {
   const head = po.map(label).join('');
   const all = po.flatMap(id => m.periods[id]);
 
-  const mine = an.my.roster.map(p => ({ p, per: po.map(id => A.gamesIn(m, p, m.periods[id])), tot: A.gamesIn(m, p, all) }))
-    .sort((a, b) => val(b.p) * b.tot - val(a.p) * a.tot);
+  // How much each round counts for you: 0 for a bye (or when playoffs are switched off),
+  // your chance of not getting a first-round bye before the bracket is set.
+  const wts = po.map(id => A.periodWeight(m, an.my.id, id, state.settings.basis));
+  const wNote = i => (playoffsOn() && wts[i] <= 0.95 ? `<br><span class="small down" title="${wts[i] === 0 ? 'No matchup for you this round, so it doesn’t count' : `About ${Math.round((1 - wts[i]) * 100)}% chance of a first-round bye: counts ${Math.round(wts[i] * 100)}%`}">${wts[i] === 0 ? 'bye · doesn’t count' : `counts ${Math.round(wts[i] * 100)}%`}</span>` : '');
+  const mine = an.my.roster.map(p => {
+    const per = po.map(id => A.gamesIn(m, p, m.periods[id]));
+    return { p, per, tot: A.gamesIn(m, p, all), cnt: per.reduce((a, n, i) => a + n * wts[i], 0) };
+  }).sort((a, b) => val(b.p) * b.cnt - val(a.p) * a.cnt);
   const avgPer = Math.max(1, Math.round(all.length / po.length / 2));
   const hc = n => Math.max(0, Math.min(5, n - avgPer + 3));
   const heatN = n => `<td class="num"><span class="heat h${hc(n)}">${n}</span></td>`;
-  const myRows = mine.map(r => `<tr class="${r.p.slot === 13 ? 'ir' : ''}"><td>${pCell(r.p)}</td>${r.per.map(heatN).join('')}<td class="num"><b>${r.tot}</b></td><td class="num">${f0(val(r.p) * r.tot)}</td></tr>`).join('');
+  const myRows = mine.map(r => `<tr class="${r.p.slot === 13 ? 'ir' : ''}"><td>${pCell(r.p)}</td>${r.per.map(heatN).join('')}<td class="num"><b>${r.tot}</b></td><td class="num">${f0(val(r.p) * r.cnt)}</td></tr>`).join('');
+  const myHead = po.map((id, i) => `<th class="num" title="${A.periodRange(m, id)}">Rd ${i + 1}<br><span class="small">${A.periodRange(m, id)}</span>${wNote(i)}</th>`).join('');
+  const off = !playoffsOn() ? `<section class="card"><p class="warnline" style="margin:0"><b>Playoffs not counted:</b> switched off in Settings, so trades, waivers and rankings ignore these weeks. This tab still shows the schedule.</p></section>` : '';
 
   const myByTeam = {};
   for (const p of an.my.roster) (myByTeam[p.proTeamId] ||= []).push(p.name.split(' ').slice(-1)[0]);
@@ -738,8 +751,8 @@ function vPlayoffs() {
 
   const stash = an.waivers.filter(w => !A.isOut(w.p)).map(w => ({ ...w, poPts: w.v * w.poGames })).sort((a, b) => b.poPts - a.poPts).slice(0, 8);
 
-  return `<section class="card"><h3>${esc(an.my.name)} in the fantasy playoffs <span class="r muted small">Highlighted = more games than usual</span></h3>
-      <div class="scrollx"><table><thead><tr><th>Player</th>${head}<th class="num">Total</th><th class="num">Proj FP</th></tr></thead><tbody>${myRows}</tbody></table></div></section>
+  return `${off}<section class="card"><h3>${esc(an.my.name)} in the fantasy playoffs <span class="r muted small">Highlighted = more games than usual</span></h3>
+      <div class="scrollx"><table><thead><tr><th>Player</th>${myHead}<th class="num">Total</th><th class="num" title="Proj/G × playoff games that count for you (bye rounds don't)">Proj FP</th></tr></thead><tbody>${myRows}</tbody></table></div></section>
     <div class="grid2">
       <section class="card"><h3>NBA games by playoff round</h3>
         <div class="scrollx"><table><thead><tr><th>Team</th>${head}<th class="num">Tot</th><th>Roster</th></tr></thead><tbody>${nbaRows}</tbody></table></div></section>
@@ -810,13 +823,13 @@ function vPower(st) {
 }
 
 function getOdds() {
-  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${adjustOn()}`;
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${adjustOn()}:${playoffsOn()}`;
   if (state.oddsCache?.key !== key) state.oddsCache = { key, odds: A.playoffOdds(state.model, state.settings.basis) };
   return state.oddsCache.odds;
 }
 
 // ---- Trade tab
-const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${state.pv || 0}`;
+const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${playoffsOn()}:${state.pv || 0}`;
 // Yield to the browser between chunks of work. MessageChannel isn't throttled in
 // background tabs the way setTimeout is, so long scans keep moving in a full-tab view.
 const yieldChannel = new MessageChannel();
@@ -848,7 +861,7 @@ async function runTradeScan(force = false) {
   await tick();
   // Screen on sampled days; refineIdeas re-checks the best ones on every day.
   const ctx = A.seasonContext(m, b, 48);
-  const myBase = ctx.S(my.roster);
+  const myBase = ctx.S(my.roster, my);
   // A finder search is what you're waiting on, so the background scan steps aside.
   const finderIdle = async () => { while (state.finder?.status === 'running') await new Promise(r => setTimeout(r, 60)); };
   for (const t of others) {
@@ -918,8 +931,8 @@ function dealCard(x, label, cls, openAttrs) {
       <span class="dtype">${TYPE_LABEL[x.type] || ''}</span>
       <span>with <button class="tlink" data-view="${x.partner.id}">${esc(x.partner.name)}</button></span>
       <span class="spacer"></span>
-      <span class="g-me ${x.myGain < 0 ? 'down' : ''}" title="Your projected points, rest of season + playoffs">${signed(x.myGain)} you</span>
-      <span class="g-them ${x.theirGain >= 0 ? 'up' : 'down'}" title="Their projected points, rest of season + playoffs">${signed(x.theirGain)} them</span>
+      <span class="g-me ${x.myGain < 0 ? 'down' : ''}" title="Your projected points, ${horizon()}">${signed(x.myGain)} you</span>
+      <span class="g-them ${x.theirGain >= 0 ? 'up' : 'down'}" title="Their projected points, ${horizon()}">${signed(x.theirGain)} them</span>
     </div>
     <div class="idea-swap"><div><div class="rk-label">You give</div>${side(x.give)}</div><div class="arrowx">⇄</div><div><div class="rk-label">You get</div>${side(x.get)}</div></div>
     <div class="idea-foot"><span class="muted small">${why.join(' · ') || 'Better lineup fit for your roster.'} · <span title="Trade value = name + form: draft position, last season, ESPN projection and this season. Includes free-agent fill-ins.">trade value ${f1(x.mktGive)} for ${f1(x.mktGet)}${x.adds?.length || x.theirAdds?.length ? ' incl. FA' : ''}</span></span>
@@ -956,8 +969,7 @@ async function runFinder() {
     if (d.paperGive / d.paperGet >= 0.85) screened.push(d);
   }, frac => finderProgress(0.75 * frac, `Testing ${cands.length.toLocaleString()} possible deals…`), live)) return;
   // Exact re-check of the best, keeping variety (no package or return repeated 3+ times).
-  const days = A.futureDays(m);
-  const exact = A.dealEvaluator(m, my, b, r => A.projectDays(m, r, days, b).total, true);
+  const exact = A.dealEvaluator(m, my, b, A.exactScorer(m, b), true);
   const queue = [], seen = {};
   for (const d of screened.sort((x, y) => rank(y) - rank(x))) {
     const gk = d.give.map(p => p.id).sort().join(','), tk = `${d.partner.id}>${d.get.map(p => p.id).sort().join(',')}`;
@@ -1022,7 +1034,7 @@ function vFinder() {
     const label = { likely: 'Likely yes', possible: 'Possible' };
     body = f.results.length
       ? `<div class="ideas">${f.results.map((x, i) => dealCard(x, label[x.kind], x.kind, `data-act="fopen" data-i="${i}"`)).join('')}</div>
-         <p class="muted small">Sorted by what each deal adds to your lineup over the rest of the season + playoffs, discounted when it costs them a lot (a harder sell). Likely yes = they get at least as much trade value as they give; possible = within ~10%, expect a counter. A negative number for you = the price of the player you asked for.</p>`
+         <p class="muted small">Sorted by what each deal adds to your lineup over the ${horizon()}, discounted when it costs them a lot (a harder sell). Likely yes = they get at least as much trade value as they give; possible = within ~10%, expect a counter. A negative number for you = the price of the player you asked for.</p>`
       : `<p class="muted">No deal they'd plausibly accept turned up. Try another player, or unlock someone on your roster.</p>`;
   } else {
     body = `<p class="muted small">${f.mode === 'get' ? 'Choose any player on another team: the finder builds packages from your roster (adding one of their role players to balance it when that helps) and keeps the ones they would plausibly accept.'
@@ -1040,7 +1052,7 @@ function vTradeIdeas() {
   const sc = state.scan;
   const f = state.ideaView ||= { kind: 'all', type: 'all', partner: 'all', limit: 10 };
   const done = sc?.status === 'done';
-  const head = `<h3>Trade ideas <span class="r muted small">${done ? `${sc.ideas.length} ideas from ${sc.total} teams · rest of season + playoffs <button class="link" data-act="rescan">Rescan</button>` : ''}</span></h3>`;
+  const head = `<h3>Trade ideas <span class="r muted small">${done ? `${sc.ideas.length} ideas from ${sc.total} teams · ${horizon()} <button class="link" data-act="rescan">Rescan</button>` : ''}</span></h3>`;
   if (!done) {
     return `<section class="card">${head}<div class="scan"><div class="scanbar"><i id="scan-bar" style="width:${((sc?.frac || 0) * 100).toFixed(0)}%"></i></div>
       <p class="muted small" id="scan-msg">${esc(sc?.msg || 'Testing 1-for-1, 2-for-1, 1-for-2 and 2-for-2 deals against every roster, with positions, schedules and injuries…')}</p></div></section>`;
@@ -1135,12 +1147,12 @@ function vTrade() {
     const ratio = mGet ? mGive / mGet : 1;
     const odds = ratio >= 0.97 ? ['likely', 'up', 'they get as much name value as they give'] : ratio >= 0.88 ? ['possible', 'muted', 'close on name value, expect a counter'] : ['unlikely', 'down', 'they give up a bigger name than they get'];
     result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
-        ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${row('Fantasy playoffs', 'po')}
+        ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${playoffsOn() ? row('Fantasy playoffs', 'po') : `<tr><td>Fantasy playoffs</td><td class="num muted" colspan="${z ? 2 : 1}">not counted</td></tr>`}
         <tr class="sum"><td>Proj/G swapped</td><td class="num">${d(vGive, vGet)}</td>${z ? `<td class="num">${d(vGet, vGive)}</td>` : ''}</tr>
         <tr class="sum"><td title="Name + form: draft position, last season, ESPN projection and this season (free-agent fill-ins included)">Trade value swapped</td><td class="num">${d(mGive, mGet)}</td>${z ? `<td class="num">${d(mGet, mGive)}</td>` : ''}</tr>
       </tbody></table>
       ${z ? `<p class="small" style="margin:10px 0 0">Acceptance: <b class="${odds[1]}">${odds[0]}</b> <span class="muted">— ${odds[2]} (trade value ${f1(mGive)} for ${f1(mGet)}).</span></p>` : ''}
-      <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${signed(verdict)} projected points the rest of the way (season + playoffs).
+      <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${signed(verdict)} projected points, ${horizon()}.</p><p class="muted small" style="margin-top:4px">Bye weeks count for nothing on either side${playoffsOn() ? ' (a likely first-round playoff bye counts for little)' : ''}.
         ${z ? `<span class="muted">${esc(partner.name)}: ${signed(theirs2)}${verdict > 0 && theirs2 > 0 ? ' — good for both, easy sell.' : verdict > 0 && vGive >= vGet * 0.97 ? ' — looks fair to them on paper.' : ''}</span>` : ''}</p>
       ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}. A team left a player short fills the spot with the best free agent for its lineup.</p>` : ''}
       ${faNote.length ? `<p class="muted small">${faNote.join('; ')}. That part isn't counted above, since it doesn't need the trade.</p>` : ''}`;
@@ -1319,12 +1331,13 @@ function vSlate() {
       <div class="sd-add">${d.past ? '' : best ? `<span class="small muted">spend an add here</span>
           <div class="addline">${pCell(best.fa)}<span class="small">${best.left} of ${best.week} left${best.b2b ? ' · B2B' : ''} · drop ${esc(best.drop.name)}</span><b class="up">${signed(best.gain)}</b></div>
           ${alts ? `<div class="alts"><span class="small muted">if not them</span>${alts}</div>` : ''}`
-        : '<span class="muted small">no add beats your roster</span>'}</div>
+        : `<span class="muted small">${s.off ? 'week doesn’t count' : 'no add beats your roster'}</span>`}</div>
     </div>`;
   }).join('');
   const groups = s.groups.map(g => `<div class="tgroup"><b>${g.games}</b><div class="tlist2">${g.teams.map(t => `<span class="tm" title="${t.b2b ? t.b2b + ' back-to-back' + (t.b2b > 1 ? 's' : '') : ''}">${esc(t.abbrev)}${t.b2b ? '<sup>B2B</sup>' : ''}</span>`).join('')}</div></div>`).join('');
   return `<section class="card"><h3>The weekly slate ${nav}<span class="r muted small">${A.periodRange(m, period)}${s.opp ? ` · vs <button class="tlink" data-view="${s.opp.id}">${esc(s.opp.name)}</button>` : ''}</span></h3>
       <div class="slate-top"><div><span class="k">Games ${period === m.currentPeriod ? 'left' : 'this week'}</span><span class="v">${s.myGames} <small>you</small></span></div><div class="vsx">vs</div><div><span class="k">&nbsp;</span><span class="v">${s.oppGames ?? '–'} <small>opp</small></span></div></div>
+      ${s.off ? `<p class="warnline"><b>${esc(s.off.title)}:</b> ${esc(s.off.detail)}</p>` : ''}
       <div class="sdays">${days}</div>
       <p class="muted small">Starts = games your best lineup uses each night (open = empty slots to stream into). Spend an add here = the free agent who adds the most from that night to the end of the week, replacing one of your three least useful players. Banned players are never suggested.</p></section>
     <section class="card"><h3>Games per NBA team <span class="r muted small">this week · B2B = back-to-back</span></h3><div class="tgroups">${groups}</div></section>`;
@@ -1426,13 +1439,13 @@ function vWorth(p, ownerId) {
   const ctx = getCtx();
   let pts, label;
   if (ownerId === my.id) {
-    pts = ctx.myBase - ctx.S(my.roster.filter(x => x.id !== p.id));
+    pts = ctx.myBase - ctx.S(my.roster.filter(x => x.id !== p.id), my);
     label = `Worth to ${esc(my.name)}`;
   } else {
-    pts = ctx.S(A.applyTrade(my.roster, [], [p], state.settings.basis).after) - ctx.myBase;
+    pts = ctx.S(A.applyTrade(my.roster, [], [p], state.settings.basis).after, my) - ctx.myBase;
     label = `Adds to ${esc(my.name)}`;
   }
-  return `<div class="worth" title="Projected points over the rest of the season + playoffs, with ${ownerId === my.id ? 'vs without' : 'after adding (dropping your least useful player)'} this player">
+  return `<div class="worth" title="Projected points over the ${horizon()} (bye weeks don't count), with ${ownerId === my.id ? 'vs without' : 'after adding (dropping your least useful player)'} this player">
     <span>${label}</span><b class="${pts > 0 ? 'up' : 'muted'}">${signed(pts)}</b><small>pts rest of season</small></div>`;
 }
 
@@ -1502,6 +1515,9 @@ function vSettings() {
     <section class="card"><h3>Projections</h3>
       <label class="toggle"><input type="checkbox" data-act="adjust" ${adjustOn() ? 'checked' : ''}>
         <span><b>Adjust for teammate injuries and back-to-back rest</b><br><span class="muted small">When a regular is out, teammates absorb part of their production (and lose it when a starter returns from a long absence). Stars get −5% on the second night of back-to-backs. Turn off for raw averages × games.</span></span></label>
+      <label class="toggle"><input type="checkbox" data-act="playoffs" ${playoffsOn() ? 'checked' : ''}>
+        <span><b>Count the fantasy playoffs</b><br><span class="muted small">On: everything season-long (trades, the finder, waiver ROS gains, player worth, rankings, injury discounts, needs) covers the rest of the regular season plus the playoff rounds. Off: regular season only, and playoff weeks count for nothing anywhere.</span></span></label>
+      <p class="muted small" style="margin:10px 0 0">Bye weeks never count: a week you have no matchup (a regular-season bye, a first-round playoff bye, or rounds after you're out) is ignored everywhere, so a player's games that week add nothing. Before the bracket is set, round 1 counts at your chance of <i>not</i> getting a bye, from the playoff-odds simulation.</p>
     </section>
     <details class="card adv"><summary><h3>Advanced: manual ESPN login <span class="r">only if your league still won't load</span></h3></summary>
       <div class="form">
@@ -1710,6 +1726,7 @@ document.addEventListener('change', async e => {
   if (act === 'basis') { state.settings.basis = e.target.value; await saveSettings(); reanalyze(); render(); }
   if (act === 'inj') { state.wv.showInjured = e.target.checked; state.keepScroll = true; render(); }
   if (act === 'under50') { state.trend.under50 = e.target.checked; state.keepScroll = true; render(); }
+  if (act === 'playoffs') { state.settings.playoffs = e.target.checked; await saveSettings(); reanalyze(); render(); toast(e.target.checked ? 'Fantasy playoffs counted' : 'Regular season only: playoffs not counted'); }
   if (act === 'adjust') { state.settings.adjust = e.target.checked; await saveSettings(); reanalyze(); render(); toast(e.target.checked ? 'Teammate usage + rest adjustments on' : 'Adjustments off: raw averages'); }
 });
 

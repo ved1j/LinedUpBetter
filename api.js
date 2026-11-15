@@ -225,6 +225,7 @@ function normalize(L, P, F, season, leagueId) {
     home: side(m.home),
     away: side(m.away),
     winner: m.winner,
+    tier: m.playoffTierType || null, // NONE (regular season), WINNERS_BRACKET, *_CONSOLATION_LADDER
   }));
 
   const freeAgents = (F.players || [])

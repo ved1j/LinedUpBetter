@@ -27,6 +27,10 @@ Private leagues: stay logged in to espn.com in the same Chrome profile. The exte
 ## Your league's settings
 Every number uses your league's own scoring (points per stat), lineup size, matchup calendar and playoff rounds. Category leagues get ESPN's standard points scoring as an estimate.
 
+## Bye weeks and playoffs
+- Bye weeks never count. A week a team has no matchup (a regular-season bye, a first-round playoff bye, or playoff rounds after it's out) is ignored everywhere: trade values for both teams, the finder, waiver ROS gains, player worth, playoff games, the Slate's adds, and this week's lineup and streaming advice ("Bye week: nothing counts"). Before the bracket is set, round 1 counts at each team's chance of *not* getting a bye, from the playoff-odds simulation (the Playoffs tab shows "counts 10%" when you're a near-lock for a bye).
+- Settings → **Count the fantasy playoffs**: on by default. Off makes everything season-long cover the regular season only (trades, finder, waivers, rankings, injury discounts, team needs), and playoff weeks count for nothing.
+
 ## Teams, stars and notes
 - Use the team switcher in the header to see everything from any team's point of view.
 - Tap ☆ to make a team your main one. The app always opens on it.

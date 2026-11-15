@@ -24,7 +24,7 @@ const dtdFactor = (m, p, sp) => (isDTD(p) && (m.periods[m.currentPeriod] || []).
 // is spread over the team in proportion to each player's own (one star out ≈ +10–13%
 // for teammates), capped at ±30%.
 // Back-to-back rest: stars (35+ Proj/G) sometimes sit the second night, so -5% there.
-export const adjustments = { usage: true, rest: true };
+export const adjustments = { usage: true, rest: true, playoffs: true };
 export const setAdjustments = o => Object.assign(adjustments, o);
 const USAGE_SHARE = 0.6, USAGE_CAP = 0.3, REST_STAR = 35, REST_FACTOR = 0.95;
 const usageMemo = new WeakMap();
@@ -225,7 +225,9 @@ export function fillLineup(players, slots, key = slots.join(',')) {
 // respecting position eligibility. Injured players (including anyone in an IR slot)
 // count from the day they're expected back. With track=true it also tallies, per
 // player, games started / benched / missed injured and points, and points per slot.
-export function projectDays(m, roster, sps, basis, track = false) {
+// `w` (a team's dayWeights) scales each day's points by how much it counts for that
+// team: 0 on bye weeks, so those days are skipped entirely.
+export function projectDays(m, roster, sps, basis, track = false, w = null) {
   const slots = startingSlots(m);
   const slotsKey = slots.join(',');
   const now = Date.now();
@@ -248,6 +250,8 @@ export function projectDays(m, roster, sps, basis, track = false) {
   let total = 0, games = 0;
   const days = [];
   for (const sp of sps) {
+    const wt = w ? w.get(sp) ?? 1 : 1;
+    if (wt === 0 && !track) continue;
     const playing = [];
     const isToday = sp === m.currentSP, inCur = cur.has(sp);
     for (const x of info) {
@@ -265,8 +269,8 @@ export function projectDays(m, roster, sps, basis, track = false) {
     const daySlots = today ? slotsLeftToday(m, roster) : slots;
     const { used, owner } = fillLineup(playing, daySlots, today ? daySlots.join(',') : slotsKey);
     const pts = used.reduce((a, x) => a + x.v, 0);
-    total += pts;
-    games += used.length;
+    total += pts * wt;
+    if (wt > 0) games += used.length;
     if (track) {
       for (const x of playing) players.get(x.p).avail++;
       owner.forEach((pi, si) => {
@@ -453,6 +457,7 @@ const marketMemo = new WeakMap();
 function marketCtx(m, basis) {
   let byBasis = marketMemo.get(m);
   if (!byBasis) marketMemo.set(m, byBasis = new Map());
+  basis = `${basis}:${adjustments.playoffs}`; // injury discounts depend on which days count
   let c = byBasis.get(basis);
   if (c) return c;
   const pool = new Map();
@@ -501,8 +506,73 @@ export function seasonWindows(m) {
   const week = remainingSps(m);
   const ros = Object.keys(m.periods).map(Number).filter(id => id >= m.currentPeriod && id <= m.regularPeriods)
     .flatMap(id => m.periods[id]).filter(sp => sp >= m.currentSP);
-  const po = playoffPeriods(m).flatMap(id => m.periods[id] || []);
+  const po = adjustments.playoffs ? playoffPeriods(m).flatMap(id => m.periods[id] || []) : [];
   return { week, ros, po };
+}
+
+// ---- Which days count
+// A team's points only matter in weeks it has a matchup that counts. Everything that
+// adds up future days (trades, waivers, streaming, needs) weights each day by this:
+//  - bye weeks count for nothing: a regular-season week with no opponent, a first-round
+//    playoff bye, playoff rounds once a team is out (missed the bracket or lost);
+//  - with "Count fantasy playoffs" off in Settings, nothing after the regular season counts;
+//  - before the bracket is set, round 1 counts at the team's chance of NOT getting a bye
+//    (from the playoff-odds simulation); later rounds count fully.
+// Returns { period: Map(periodId → weight), sp: Map(day → weight) }, listing only days
+// that don't count fully.
+const WINNERS = 'WINNERS_BRACKET';
+const weightMemo = new WeakMap(), byeMemo = new WeakMap();
+const hasTeam = (x, id) => x.home?.teamId === id || x.away?.teamId === id;
+const realGame = x => x.home?.teamId != null && x.away?.teamId != null;
+const inBracket = x => !x.tier || x.tier === 'NONE' || x.tier === WINNERS;
+export const playoffByes = m => { const n = m.playoffTeamCount || 4; return 2 ** Math.ceil(Math.log2(n)) - n; };
+function byeChance(m, teamId, basis) {
+  let byKey = byeMemo.get(m);
+  if (!byKey) byeMemo.set(m, byKey = new Map());
+  const k = `${basis}:${adjustments.usage}:${adjustments.rest}`;
+  if (!byKey.has(k)) byKey.set(k, playoffOdds(m, basis, 2000));
+  return byKey.get(k).teams[teamId]?.bye ?? 0;
+}
+export function dayWeights(m, teamId, basis = 'smart') {
+  let byKey = weightMemo.get(m);
+  if (!byKey) weightMemo.set(m, byKey = new Map());
+  const k = `${teamId}:${basis}:${adjustments.playoffs}:${adjustments.usage}:${adjustments.rest}`;
+  if (byKey.has(k)) return byKey.get(k);
+  const period = new Map();
+  for (let id = m.currentPeriod; id <= m.regularPeriods; id++) {
+    const games = m.matchups.filter(x => x.period === id && realGame(x));
+    if (games.length && !games.some(x => hasTeam(x, teamId))) period.set(id, 0);
+  }
+  const rounds = playoffPeriods(m);
+  if (!adjustments.playoffs) for (const id of rounds) period.set(id, 0);
+  else {
+    const bracket = m.matchups.filter(x => x.period > m.regularPeriods && inBracket(x));
+    const drawn = bracket.some(realGame);
+    const team = m.teams.find(t => t.id === teamId);
+    const inIt = bracket.some(x => hasTeam(x, teamId)) || (team?.seed != null && team.seed <= (m.playoffTeamCount || 4));
+    const lost = bracket.some(x => realGame(x) && hasTeam(x, teamId) && (x.winner === 'HOME' || x.winner === 'AWAY')
+      && (x.winner === 'HOME') !== (x.home.teamId === teamId));
+    rounds.forEach((id, i) => {
+      const games = bracket.filter(x => x.period === id && realGame(x));
+      let w = 1;
+      if (!drawn) w = i === 0 && playoffByes(m) ? 1 - byeChance(m, teamId, basis) : 1;
+      else if (!inIt || lost) w = 0;
+      else if (games.length) w = games.some(x => hasTeam(x, teamId)) ? 1 : 0;
+      if (w !== 1) period.set(id, w);
+    });
+  }
+  const sp = new Map();
+  for (const [id, w] of period) for (const d of m.periods[id] || []) sp.set(d, w);
+  const out = { period, sp };
+  byKey.set(k, out);
+  return out;
+}
+export const periodWeight = (m, teamId, id, basis) => dayWeights(m, teamId, basis).period.get(id) ?? 1;
+// Why a week doesn't count for a team (for notes and the Slate).
+export function offReason(m, id) {
+  if (id > m.regularPeriods && !adjustments.playoffs) return { title: 'Playoffs not counted', detail: 'Fantasy playoffs are switched off in Settings, so this week doesn’t count anywhere.' };
+  if (id > m.regularPeriods) return { title: 'No playoff matchup', detail: 'A first-round bye or out of the bracket, so nothing this round counts: no lineup moves or streams needed.' };
+  return { title: 'Bye week', detail: 'No opponent this week, so nothing counts: no lineup moves or streams needed.' };
 }
 
 // Roster after a trade. Incoming players arrive on the bench; if the team now has more
@@ -565,9 +635,9 @@ function faPool(m, basis) {
 // schedule, injuries), checked across the 60 best free agents by Proj/G. This is the
 // "best possible waiver pickup" used whenever a trade leaves a team a player short.
 export function rankFillins(m, team, basis, S, exclude = null) {
-  const base = S(team.roster);
+  const base = S(team.roster, team);
   return faPool(m, basis).filter(p => !exclude?.has(p.id)).slice(0, 60)
-    .map(fa => ({ fa, gain: S(applyTrade(team.roster, [], [fa], basis).after) - base }))
+    .map(fa => ({ fa, gain: S(applyTrade(team.roster, [], [fa], basis).after, team) - base }))
     .sort((a, b) => b.gain - a.gain).map(x => x.fa);
 }
 // Fill-in settings per team, ranked once per context. Players you've banned are never
@@ -577,7 +647,7 @@ function makeFills(m, my, basis, S, exact) {
   return team => {
     if (!cache.has(team.id)) {
       const exclude = team.id === my.id ? m.banned || null : null;
-      cache.set(team.id, { fas: rankFillins(m, team, basis, S, exclude), S: exact ? S : null, k: 4, exclude });
+      cache.set(team.id, { fas: rankFillins(m, team, basis, S, exclude), S: exact ? r => S(r, team) : null, k: 4, exclude });
     }
     return cache.get(team.id);
   };
@@ -587,15 +657,15 @@ const banned = m => m.banned || new Set();
 // What the free agents a trade lets a team pick up would be worth on their own (added by
 // dropping its least useful players instead of trading). Taken out of a trade's value,
 // so a 2-for-1 isn't credited for a waiver move the team could make anyway.
-export function faAlone(roster, adds, basis, S, base = null) {
+export function faAlone(roster, adds, basis, S, base = null, team = null) {
   if (!adds?.length) return 0;
-  return Math.max(0, S(applyTrade(roster, [], adds, basis).after) - (base ?? S(roster)));
+  return Math.max(0, S(applyTrade(roster, [], adds, basis).after, team) - (base ?? S(roster, team)));
 }
 // Same, memoized per team + pickup: within one scan it's always the same answer.
 function faAloneMemo(memo, team, adds, basis, S, base) {
   if (!adds?.length) return 0;
   const k = `${team.id}:${adds.map(p => p.id).join(',')}`;
-  if (!memo.has(k)) memo.set(k, faAlone(team.roster, adds, basis, S, base));
+  if (!memo.has(k)) memo.set(k, faAlone(team.roster, adds, basis, S, base, team));
   return memo.get(k);
 }
 
@@ -604,14 +674,15 @@ export function tradeImpact(m, team, give, get, basis, mine = true) {
   const before = team.roster;
   // Pick any free-agent fill-in on every remaining day, exactly like the trade ideas do.
   const days = futureDays(m);
-  const S = r => projectDays(m, r, days, basis).total;
+  const tw = dayWeights(m, team.id, basis).sp;
+  const S = r => projectDays(m, r, days, basis, false, tw).total;
   const exclude = mine ? m.banned || null : null;
   const { after, drops, adds } = applyTrade(before, give, get, basis, { fas: rankFillins(m, team, basis, S, exclude), S, k: 4, exclude });
   const w = seasonWindows(m);
   const calc = r => ({
-    week: projectDays(m, r, w.week, basis).total,
-    ros: projectDays(m, r, w.ros, basis).total,
-    po: projectDays(m, r, w.po, basis).total,
+    week: projectDays(m, r, w.week, basis, false, tw).total,
+    ros: projectDays(m, r, w.ros, basis, false, tw).total,
+    po: projectDays(m, r, w.po, basis, false, tw).total,
   });
   const b = calc(before);
   // Value of the free-agent pickup on its own, per window (not credited to the trade).
@@ -700,6 +771,10 @@ export function analyze(m, basis = 'smart') {
   const my = team(m.myTeamId) || m.teams[0];
   const rem = remainingSps(m);
   const base = projectDays(m, my.roster, rem, basis);
+  // A week that doesn't count for you (bye, out of the playoffs, playoffs switched off):
+  // no lineup advice, streaming or this-week gains.
+  const tw = dayWeights(m, my.id, basis);
+  const off = (tw.period.get(m.currentPeriod) ?? 1) === 0 ? offReason(m, m.currentPeriod) : null;
 
   // ---- Matchup
   let matchup = null;
@@ -723,19 +798,22 @@ export function analyze(m, basis = 'smart') {
   const drop = pool.slice().sort((a, b) => value(a, basis) - value(b, basis))[0] || null;
   const dropV = drop ? value(drop, basis) : 0;
   const po = playoffPeriods(m).flatMap(id => m.periods[id] || []);
+  const poW = sp => tw.sp.get(sp) ?? 1;
+  const nextCounts = (tw.period.get(m.currentPeriod + 1) ?? 1) > 0;
   const without = my.roster.filter(p => p !== drop);
   const waivers = m.freeAgents.map(p => {
     const v = value(p, basis);
     const gl = gamesIn(m, p, rem);
     let score = v * (1 + 0.06 * (gl - 3));
     if (isOut(p) && (p.outForSeason || !p.returnSP)) score *= 0.4; else if (isDTD(p)) score *= 0.9;
-    const weekGain = drop ? projectDays(m, [...without, p], rem, basis).total - base.total : 0;
+    const weekGain = drop && !off ? projectDays(m, [...without, p], rem, basis).total - base.total : 0;
     const s = p.stats;
     return {
       p, v, gl, score, weekGain,
       rosGain: v - dropV,
-      poGames: gamesIn(m, p, po),
-      nextG: gamesIn(m, p, m.periods[m.currentPeriod + 1] || []),
+      // Playoff games that count for you (a likely first-round bye counts for little).
+      poGames: Math.round(po.reduce((a, sp) => a + (gameLeft(m, p, sp) && availableOn(m, p, sp) ? poW(sp) : 0), 0)),
+      nextG: nextCounts ? gamesIn(m, p, m.periods[m.currentPeriod + 1] || []) : 0,
       trend: s.l15 && s.season && s.season.gp >= 8 ? s.l15.avg - s.season.avg : null,
       rosFP: null,
     };
@@ -743,21 +821,22 @@ export function analyze(m, basis = 'smart') {
   // Rest-of-season value of each top free agent if swapped in for the drop candidate.
   if (drop) {
     const ctx = seasonContext(m, basis, 36);
-    const rosBase = ctx.S(my.roster);
-    for (const w of waivers.slice().sort((a, b) => b.v - a.v).slice(0, 80)) w.rosFP = ctx.S([...without, w.p]) - rosBase;
+    const rosBase = ctx.S(my.roster, my);
+    for (const w of waivers.slice().sort((a, b) => b.v - a.v).slice(0, 80)) w.rosFP = ctx.S([...without, w.p], my) - rosBase;
   }
 
   // ---- Notes
   const notes = [];
   const note = (type, tag, title, detail = '') => notes.push({ type, tag, title, detail });
-  if (matchup && !matchup.bye) {
+  if (off) note('info', 'Matchup', off.title, off.detail);
+  else if (matchup && !matchup.bye) {
     const diff = matchup.myProj - matchup.oppProj;
     const wp = Math.min(99, Math.max(1, Math.round(matchup.winProb * 100)));
     if (diff >= 0) note('good', 'Matchup', `On pace to win by ${Math.round(diff)}`, `${wp}% win chance. ${matchup.myGames} games left for you, ${matchup.oppGames} for ${matchup.opp.name}.`);
     else note('bad', 'Matchup', `On pace to lose by ${Math.round(-diff)}`, `${wp}% win chance. You need volume: stream players who play on your open days.`);
   } else if (matchup?.bye) note('info', 'Matchup', 'Bye week', 'No matchup this period.');
 
-  const lc = lineupCheck(m, my, basis);
+  const lc = off ? null : lineupCheck(m, my, basis);
   if (lc && lc.gain >= 1 && lc.start.length) {
     note('bad', 'Today', `Set your lineup: +${Math.round(lc.gain)} pts today`,
       [`Start ${lc.start.map(p => p.name).join(', ')}${lc.intoOpen ? (lc.sit.length ? '' : ' (open slots, no one needs to sit)') : ''}`,
@@ -765,7 +844,7 @@ export function analyze(m, basis = 'smart') {
   }
   // An injured starter only costs you if someone healthy could take the slot, which is
   // exactly what lineupCheck decides; warn separately only when it can't run.
-  if (!lc) for (const p of my.roster) {
+  if (!lc && !off) for (const p of my.roster) {
     if (!availableOn(m, p, m.currentSP) && p.slot != null && p.slot < 12) note('bad', 'Lineup', `${p.name} is out and starting`, `${returnLabel(p)}. Swap in a healthy bench player before lock.`);
   }
   const irSlots = m.slotCounts?.[13] || 0;
@@ -777,13 +856,13 @@ export function analyze(m, basis = 'smart') {
     const benchOut = my.roster.filter(p => p.slot === 12 && isOut(p));
     if (benchOut.length) note('info', 'IR', 'Open IR slot', `Move ${benchOut.map(p => p.name).join(', ')} to IR and use the spot for a streamer.`);
   }
-  const open = base.days.filter(d => d.open > 0);
+  const open = off ? [] : base.days.filter(d => d.open > 0);
   const openTotal = open.reduce((a, d) => a + d.open, 0);
   if (openTotal) {
     note('warn', 'Lineup', `${openTotal} empty slot${openTotal > 1 ? 's' : ''} left this week`,
       open.map(d => `${fmtDow(spDate(m, d.sp))} ${d.open}`).join(', ') + '. Each one is free points for a streamer.');
   }
-  const benched = base.days.reduce((a, d) => a + d.benched, 0);
+  const benched = off ? 0 : base.days.reduce((a, d) => a + d.benched, 0);
   if (benched >= 3) note('info', 'Lineup', `${benched} games stuck on your bench`, 'Too many players on the same nights. Trade volume for someone who plays your light days.');
 
   const hot = [], cold = [];
@@ -812,7 +891,7 @@ export function analyze(m, basis = 'smart') {
       down.slice(0, 3).map(x => `${x.p.name} ${Math.round((x.factor - 1) * 100)}%${why(x) ? ` (${why(x)} back)` : ''}`).join(', ') + '.');
   }
 
-  const plan = streamPlan(m, my, basis, addsLeft(m, my));
+  const plan = off ? [] : streamPlan(m, my, basis, addsLeft(m, my));
   if (plan.length) {
     const total = plan.reduce((a, x) => a + x.gain, 0);
     note('good', 'Stream', `Streaming plan: +${Math.round(total)} pts this week`,
@@ -828,21 +907,28 @@ export function analyze(m, basis = 'smart') {
   }
   if (!notes.length) note('good', 'Lineup', 'Clean lineup', 'No injured starters and no open slots.');
 
-  return { my, rem, base, matchup, waivers, drop, dropV, feedback: notes, lineup: lc, plan };
+  return { my, rem, base, matchup, waivers, drop, dropV, feedback: notes, lineup: lc, plan, off };
 }
 
 // ---- Season-long evaluation: team needs, trade ideas, targets, power rankings
 
-// Remaining regular-season days plus the fantasy playoffs: what a trade is judged on.
+// Remaining regular-season days plus the fantasy playoffs (when counted): what a trade
+// is judged on. Each team then weights these days by dayWeights (byes count 0).
 export function futureDays(m) {
   const w = seasonWindows(m);
   return [...w.ros, ...w.po.filter(sp => sp >= m.currentSP)];
 }
 
 // Shared sampled window + scorer so every trade is compared on identical days.
+// S(roster, team): projected points over the days that count for that team.
 export function seasonContext(m, basis, max = 48) {
   const { days, scale } = sampleDays(futureDays(m), max);
-  return { days, scale, S: roster => projectDays(m, roster, days, basis).total * scale };
+  return { days, scale, S: (roster, team) => projectDays(m, roster, days, basis, false, team ? dayWeights(m, team.id, basis).sp : null).total * scale };
+}
+// Same on every remaining day (exact re-checks).
+export function exactScorer(m, basis) {
+  const days = futureDays(m);
+  return (roster, team) => projectDays(m, roster, days, basis, false, team ? dayWeights(m, team.id, basis).sp : null).total;
 }
 
 const SLOT_GROUP = { 0: 'PG', 1: 'SG', 2: 'SF', 3: 'PF', 4: 'C', 5: 'G', 6: 'F', 7: 'SG/SF', 8: 'G/F', 9: 'PF/C', 10: 'F/C', 11: 'UTIL' };
@@ -885,7 +971,7 @@ export function teamNeeds(m, basis) {
 export const DEAL_TYPES = ['1for1', '2for1', '1for2', '2for2'];
 export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TYPES, locked = new Set()) {
   const v = p => value(p, basis);
-  const theirBase = ctx.S(other.roster);
+  const theirBase = ctx.S(other.roster, other);
   const pieces = t => t.roster.filter(p => !p.outForSeason && v(p) >= 8).sort((a, b) => v(b) - v(a)).slice(0, 11);
   const mine = pieces(my).filter(p => !locked.has(p.id)), theirs = pieces(other).filter(p => !banned(m).has(p.id));
   const sum = ps => ps.reduce((a, p) => a + v(p), 0);
@@ -899,10 +985,10 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
   const consider = (give, get) => {
     const a = applyTrade(my.roster, give, get, basis, fillOf(my));
     // Screening on sampled days is loose on purpose; refineIdeas re-checks exactly.
-    const myGain = ctx.S(a.after) - myBase - faAloneMemo(faMemo, my, a.adds, basis, ctx.S, myBase);
+    const myGain = ctx.S(a.after, my) - myBase - faAloneMemo(faMemo, my, a.adds, basis, ctx.S, myBase);
     if (myGain < 0) return;
     const z = applyTrade(other.roster, get, give, basis, fillOf(other));
-    const theirGain = ctx.S(z.after) - theirBase - faAloneMemo(faMemo, other, z.adds, basis, ctx.S, theirBase);
+    const theirGain = ctx.S(z.after, other) - theirBase - faAloneMemo(faMemo, other, z.adds, basis, ctx.S, theirBase);
     const giveV = sum(give), getV = sum(get);
     const paperGive = paper([...give, ...z.adds]), paperGet = paper([...get, ...a.adds]);
     // Same acceptance rule as the exact pass, with slack for sampling noise.
@@ -989,7 +1075,7 @@ function rateIdea(myGain, theirGain, giveV, getV) {
 // agent fill-in is picked for lineup fit (otherwise the top Proj/G one, for screening).
 export function dealEvaluator(m, my, basis, S, exact = false) {
   const base = new Map();
-  const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster)); return base.get(t.id); };
+  const baseOf = t => { if (!base.has(t.id)) base.set(t.id, S(t.roster, t)); return base.get(t.id); };
   const fillOf = makeFills(m, my, basis, S, exact);
   const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
   const mkt = ps => ps.reduce((a, p) => a + marketValue(m, p, basis), 0);
@@ -1000,8 +1086,8 @@ export function dealEvaluator(m, my, basis, S, exact = false) {
     const z = applyTrade(partner.roster, get, give, basis, fillOf(partner));
     return {
       partner, give, get, type: `${give.length}for${get.length}`,
-      myGain: S(a.after) - baseOf(my) - faAloneMemo(faMemo, my, a.adds, basis, S, baseOf(my)),
-      theirGain: S(z.after) - baseOf(partner) - faAloneMemo(faMemo, partner, z.adds, basis, S, baseOf(partner)),
+      myGain: S(a.after, my) - baseOf(my) - faAloneMemo(faMemo, my, a.adds, basis, S, baseOf(my)),
+      theirGain: S(z.after, partner) - baseOf(partner) - faAloneMemo(faMemo, partner, z.adds, basis, S, baseOf(partner)),
       giveV: sum(give), getV: sum(get),
       paperGive: paper([...give, ...z.adds]), paperGet: paper([...get, ...a.adds]),
       mktGive: mkt([...give, ...z.adds]), mktGet: mkt([...get, ...a.adds]),
@@ -1011,8 +1097,7 @@ export function dealEvaluator(m, my, basis, S, exact = false) {
 }
 
 export function makeRefiner(m, my, basis) {
-  const days = futureDays(m);
-  const evalDeal = dealEvaluator(m, my, basis, roster => projectDays(m, roster, days, basis).total, true);
+  const evalDeal = dealEvaluator(m, my, basis, exactScorer(m, basis), true);
   return x => {
     const d = evalDeal(x.give, x.get, x.partner);
     const rated = rateIdea(d.myGain, d.theirGain, d.paperGive, d.paperGet);
@@ -1083,9 +1168,11 @@ export function tradeReason(m, my, idea, basis, ctx) {
   // Compare against the roster that already made the free-agent pickup on its own, so the
   // reason reflects the trade itself.
   const start = idea.adds?.length ? applyTrade(my.roster, [], idea.adds, basis).after : my.roster;
-  const before = projectDays(m, start, ctx.days, basis, true);
-  const after = projectDays(m, applyTrade(my.roster, idea.give, [...idea.get, ...(idea.adds || [])], basis).after, ctx.days, basis, true);
-  const n = Math.max(1, ctx.days.length);
+  const tw = dayWeights(m, my.id, basis).sp;
+  const days = ctx.days.filter(sp => (tw.get(sp) ?? 1) > 0);
+  const before = projectDays(m, start, days, basis, true);
+  const after = projectDays(m, applyTrade(my.roster, idea.give, [...idea.get, ...(idea.adds || [])], basis).after, days, basis, true);
+  const n = Math.max(1, days.length);
   const deltas = Object.keys({ ...before.slotPts, ...after.slotPts }).map(Number)
     .map(id => ({ id, d: ((after.slotPts[id] || 0) - (before.slotPts[id] || 0)) / n }))
     .sort((a, b) => b.d - a.d);
@@ -1099,7 +1186,7 @@ export function tradeTargets(m, my, basis, ctx, myBase, limit = 10) {
   return m.teams.filter(t => t.id !== my.id)
     .flatMap(t => t.roster.filter(p => !p.outForSeason && !banned(m).has(p.id)).map(p => ({ p, owner: t })))
     .sort((a, b) => v(b.p) - v(a.p)).slice(0, 60)
-    .map(x => ({ ...x, gain: ctx.S(applyTrade(my.roster, [], [x.p], basis).after) - myBase }))
+    .map(x => ({ ...x, gain: ctx.S(applyTrade(my.roster, [], [x.p], basis).after, my) - myBase }))
     .filter(x => x.gain > 0)
     .sort((a, b) => b.gain - a.gain).slice(0, limit);
 }
@@ -1155,7 +1242,8 @@ export function weeklySlate(m, my, period, basis, fas) {
   const pool = fas.filter(p => !p.outForSeason && gamesIn(m, p, left) > 0)
     .sort((a, b) => value(b, basis) * gamesIn(m, b, left) - value(a, basis) * gamesIn(m, a, left)).slice(0, 40);
   const adds = {};
-  for (const d of left) {
+  const off = periodWeight(m, my.id, period, basis) === 0 ? offReason(m, period) : null;
+  for (const d of off ? [] : left) {
     const rest = left.filter(sp => sp >= d);
     const base = projectDays(m, my.roster, rest, basis).total;
     adds[d] = pool.filter(p => gameLeft(m, p, d) && availableOn(m, p, d)).map(fa => {
@@ -1168,7 +1256,7 @@ export function weeklySlate(m, my, period, basis, fas) {
     }).filter(x => x.gain >= 3).sort((a, b) => b.gain - a.gain).slice(0, 3);
   }
   return {
-    period, days, left, opp,
+    period, days, left, opp, off,
     myGames: mineP.games, oppGames: theirsP?.games ?? null,
     perDay: days.map(sp => ({ sp, nba: nbaGames(sp), past: sp < m.currentSP || !left.includes(sp), mine: myDay[sp], theirs: oppDay[sp], adds: adds[sp] || [] })),
     groups: Object.entries(groups).map(([g, ts]) => ({ games: +g, teams: ts.sort((a, b) => a.abbrev.localeCompare(b.abbrev)) })).sort((a, b) => b.games - a.games),
