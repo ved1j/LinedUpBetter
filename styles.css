@@ -566,3 +566,21 @@ tr.tier td { font-family: var(--display); font-weight: 700; font-size: 10.5px; l
 .tr-p { display: flex; flex-direction: column; padding: 4px 0; font-size: 13px; line-height: 1.3; }
 .tr-tot { font-family: var(--display); font-weight: 800; font-size: 18px; text-align: right; margin-top: 4px; }
 @media (max-width: 640px) { .tr-sides { grid-template-columns: 1fr; } }
+
+/* ---------- fun (clarity pass) */
+.funnav { position: sticky; top: 0; z-index: 3; background: var(--bg); padding: 8px 0; margin: -8px 0 6px; }
+.fun-lead { margin: -4px 0 12px; }
+.awgroup + .awgroup { margin-top: 16px; }
+.awgroup .rk-label { margin-bottom: 8px; }
+.award.mine { box-shadow: inset 0 0 0 1px var(--volt); }
+.award small i { font-style: normal; margin-left: 6px; padding: 0 5px; border-radius: 3px; background: var(--volt); color: var(--ink); letter-spacing: .08em; }
+.callout { background: var(--volt-soft); border-left: 2px solid var(--volt); padding: 10px 12px; border-radius: 6px; margin: 4px 0 12px; line-height: 1.5; }
+.howto { margin: 12px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.howto li + li { margin-top: 3px; }
+.howto b { color: var(--text); font-weight: 600; }
+.tr-say { margin: 0 0 8px; color: var(--muted); }
+.tr-line { display: flex; justify-content: space-between; font-size: 12.5px; padding: 2px 0; color: var(--muted); }
+.tr-lines { margin-top: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
+.tr-line.tot { color: var(--text); font-weight: 600; font-size: 13.5px; }
+.tr-line.tot b { font-family: var(--display); font-size: 17px; }
+.card[id^="fun-"] { scroll-margin-top: 52px; }

@@ -1513,33 +1513,68 @@ export function funStats(m, basis) {
     r.winStreak = streak(r.results, 'W'); r.loseStreak = streak(r.results, 'L');
   }
 
-  // Schedule swap: team a's record against team b's schedule (when b played a, a plays b).
-  const swap = {};
-  for (const a of ids) {
-    swap[a] = {};
-    for (const b of ids) {
-      let w = 0, l = 0, t = 0;
-      for (const wk of weeks) {
-        if (wk.score[a] == null || wk.score[b] == null) continue;
-        const o = wk.opp[b] === a ? b : wk.opp[b];
-        if (wk.score[o] == null) continue;
-        if (wk.score[a] > wk.score[o]) w++; else if (wk.score[a] < wk.score[o]) l++; else t++;
-      }
-      swap[a][b] = { w, l, t };
+  // Schedule luck, two ways: finished weeks only ("so far"), and the whole regular season
+  // (finished weeks with real scores, this week live + projected, later weeks projected
+  // with current rosters). In projected weeks a win is a probability, from the same
+  // model as matchup win %.
+  const season = [];
+  for (let p = 1; p <= m.regularPeriods; p++) {
+    const ms = m.matchups.filter(x => x.period === p && x.home && x.away);
+    if (!ms.length) continue;
+    const final = p < m.currentPeriod;
+    const days = final ? [] : daysLeft(m, p);
+    const wk = { period: p, final, score: {}, opp: {}, games: {}, rem: {} };
+    for (const x of ms) for (const [me, them] of [[x.home, x.away], [x.away, x.home]]) {
+      const id = me.teamId;
+      wk.opp[id] = them.teamId;
+      if (final || !team(id)) { wk.score[id] = me.pts || 0; wk.games[id] = 0; wk.rem[id] = 0; continue; }
+      const pr = projectDays(m, team(id).roster, days, basis);
+      wk.score[id] = (p === m.currentPeriod ? me.pts || 0 : 0) + pr.total;
+      wk.games[id] = pr.games; wk.rem[id] = pr.total;
     }
+    wk.ids = Object.keys(wk.score).map(Number);
+    wk.wp = (x, y) => {
+      const d = wk.score[x] - wk.score[y];
+      if (wk.final) return d > 0 ? 1 : d < 0 ? 0 : 0.5;
+      return phi(d / (Math.sqrt((wk.games[x] + wk.games[y]) * 160 + (0.06 * (wk.rem[x] + wk.rem[y])) ** 2) + 5));
+    };
+    season.push(wk);
   }
-  for (const r of rows.values()) {
-    const recs = ids.map(b => ({ b, ...swap[r.team.id][b] }));
-    r.bestSched = recs.reduce((x, y) => (y.w > x.w ? y : x));
-    r.worstSched = recs.reduce((x, y) => (y.w < x.w ? y : x));
-  }
-  // Road ahead: remaining opponents' points per week so far.
-  const pfWk = id => { const r = rows.get(id); return r.games ? r.pf / r.games : null; };
-  for (const r of rows.values()) {
-    const opps = m.matchups.filter(x => x.period >= m.currentPeriod && x.period <= m.regularPeriods && x.home && x.away && hasTeam(x, r.team.id))
-      .map(x => (x.home.teamId === r.team.id ? x.away.teamId : x.home.teamId)).map(pfWk).filter(v => v != null);
-    r.ahead = opps.length ? opps.reduce((a, b) => a + b, 0) / opps.length : null;
-  }
+  const luckTable = list => {
+    const out = new Map(ids.map(id => [id, { team: team(id), w: 0, l: 0, t: 0, games: 0, pf: 0, pa: 0, expW: 0, projected: 0 }]));
+    for (const wk of list) for (const id of wk.ids) {
+      const r = out.get(id), o = wk.opp[id], win = wk.wp(id, o);
+      r.games++; r.w += win; r.l += 1 - win; r.pf += wk.score[id]; r.pa += wk.score[o];
+      if (wk.final && win === 0.5) { r.t++; r.w -= 0.5; r.l -= 0.5; }
+      if (!wk.final) r.projected++;
+      let sum = 0;
+      for (const j of wk.ids) if (j !== id) sum += wk.wp(id, j);
+      r.expW += sum / Math.max(1, wk.ids.length - 1);
+    }
+    // Swap: team a against team b's opponents (when b played a, a plays b).
+    const swap = {};
+    for (const a of ids) {
+      swap[a] = {};
+      for (const b of ids) {
+        let w = 0, g = 0;
+        for (const wk of list) {
+          if (wk.score[a] == null || wk.score[b] == null) continue;
+          const o = wk.opp[b] === a ? b : wk.opp[b];
+          if (wk.score[o] == null) continue;
+          w += wk.wp(a, o); g++;
+        }
+        swap[a][b] = { w, l: g - w, g };
+      }
+    }
+    for (const r of out.values()) {
+      r.luck = r.w + r.t / 2 - r.expW;
+      const recs = ids.map(b => ({ b, ...swap[r.team.id][b] })).filter(x => x.g);
+      r.bestSched = recs.length ? recs.reduce((x, y) => (y.w > x.w ? y : x)) : null;
+      r.worstSched = recs.length ? recs.reduce((x, y) => (y.w < x.w ? y : x)) : null;
+    }
+    return { rows: [...out.values()].filter(r => r.games), swap, weeks: list.length, projected: list.filter(w => !w.final).length };
+  };
+  const luck = { sofar: luckTable(season.filter(w => w.final)), season: luckTable(season) };
 
   // Trades rebuilt from rosters, graded like the trade analyzer, for each side:
   //  - rest of season: lineup-aware projection of its roster now vs with the trade undone
@@ -1596,5 +1631,5 @@ export function funStats(m, basis) {
   const hurt = m.teams.map(t => { const out = t.roster.filter(isOut); return { team: t, n: out.length, fp: out.reduce((a, p) => a + value(p, basis), 0) }; })
     .sort((a, b) => b.fp - a.fp);
 
-  return { weeks: weeks.map(w => w.period), rows: [...rows.values()], swap, games, trades, pickups, mvp, hurt };
+  return { weeks: weeks.map(w => w.period), rows: [...rows.values()], luck, games, trades, pickups, mvp, hurt };
 }
