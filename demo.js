@@ -50,7 +50,7 @@ export function makeDemo() {
       injury: inj < 0.05 ? 'OUT' : inj < 0.11 ? 'DAY_TO_DAY' : 'ACTIVE',
       outForSeason: false, injuryType: null, returnDate: null, returnSP: null,
       owned: null, ownedChange: null, newsAt: null, adp: null, auction: null, espnRank: null,
-      slot: null, status: null,
+      slot: null, status: null, acqType: null, acqDate: null,
       stats: {
         season: { avg: +base.toFixed(1), gp },
         l7: { avg: +(base * rand(0.7, 1.3)).toFixed(1), gp: int(2, 4) },
@@ -85,7 +85,8 @@ export function makeDemo() {
   const values = Array.from({ length: 140 }, () => 14 + 38 * r() ** 1.6).sort((a, b) => b - a);
   const teams = TEAMS.map((name, i) => ({
     id: i + 1, name, abbrev: name.split(' ').map(w => w[0]).join('').slice(0, 4).toUpperCase(),
-    owners: [], wins: 0, losses: 0, ties: 0, pf: 0, pa: 0, seed: null, acq: { [currentPeriod]: int(0, 3) }, roster: [],
+    owners: [], wins: 0, losses: 0, ties: 0, pf: 0, pa: 0, seed: null, acq: { [currentPeriod]: int(0, 3) },
+    moves: { adds: null, drops: null, trades: null, ir: null, lineup: null }, roster: [],
   }));
   values.forEach((v, i) => {
     const round = Math.floor(i / 10), k = i % 10;
@@ -129,6 +130,27 @@ export function makeDemo() {
       }
       matchups.push({ period: wk, home: { teamId: home, pts: hp }, away: { teamId: away, pts: ap }, winner });
     }
+  }
+
+  // How each rostered player was acquired (separate RNG: the rest of the demo is unchanged).
+  // Most were drafted the day before the season; a few came off waivers; three trades.
+  let seed2 = 99;
+  const r2 = () => ((seed2 = (seed2 * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const int2 = (a, b) => Math.floor(a + (b - a + 1) * r2());
+  const at = sp => { const d = new Date(d1); d.setDate(d.getDate() + sp - 1); d.setHours(int2(8, 22), int2(0, 59), 0, 0); return d.getTime(); };
+  const draftDay = at(0);
+  for (const t of teams) {
+    for (const p of t.roster) { p.acqType = 'DRAFT'; p.acqDate = draftDay; }
+    const adds = int2(1, 4);
+    t.roster.slice().sort((a, b) => a.stats.season.avg - b.stats.season.avg).slice(0, adds)
+      .forEach(p => { p.acqType = 'ADD'; p.acqDate = at(int2(2, currentSP - 1)); });
+    t.moves = { adds: adds + int2(0, 14), drops: adds + int2(0, 14), trades: 0, ir: int2(0, 4), lineup: int2(8, 70) };
+  }
+  for (const [a, b, ga, gb] of [[1, 6, 1, 2], [3, 9, 1, 1], [4, 7, 2, 1]]) {
+    const when = at(int2(4, currentSP - 2));
+    const pickN = (t, n) => t.roster.filter(p => p.acqType === 'DRAFT' && p.slot !== 13).sort(() => r2() - 0.5).slice(0, n);
+    for (const p of [...pickN(teams[a - 1], ga), ...pickN(teams[b - 1], gb)]) { p.acqType = 'TRADE'; p.acqDate = when; }
+    teams[a - 1].moves.trades++; teams[b - 1].moves.trades++;
   }
 
   return {

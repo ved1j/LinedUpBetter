@@ -19,7 +19,7 @@ document.body.classList.toggle('full', full);
 
 const defaultSeason = () => { const d = new Date(); return d.getMonth() >= 7 ? d.getFullYear() + 1 : d.getFullYear(); };
 const CACHE_MS = 60 * 1000; // short: live scores and lineup changes on ESPN show up quickly
-const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['slate', 'Slate'], ['waivers', 'Waivers'], ['players', 'Players'], ['trade', 'Trade'], ['injuries', 'Injuries'], ['playoffs', 'Playoffs'], ['league', 'League'], ['watchlist', 'Watchlist'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['roster', 'Roster'], ['matchups', 'Matchups'], ['slate', 'Slate'], ['waivers', 'Waivers'], ['players', 'Players'], ['trade', 'Trade'], ['injuries', 'Injuries'], ['playoffs', 'Playoffs'], ['league', 'League'], ['fun', 'Fun'], ['watchlist', 'Watchlist'], ['settings', 'Settings']];
 
 const state = {
   settings: { leagueId: '', season: defaultSeason(), teamId: null, basis: 'smart', demo: false, starred: {} },
@@ -577,6 +577,133 @@ function vWaivers() {
     ${vHidden()}
   </section>
   ${vTrends()}`;
+}
+
+// ---- Fun: superlatives, schedule luck, schedule swap, trade report card, waiver heroes
+const getFun = () => memo('fun', () => A.funStats(state.model, state.settings.basis));
+function vFun() {
+  const { an, model: m } = state;
+  const F = getFun();
+  const team = id => m.teams.find(t => t.id === id);
+  const tb = t => `<button class="tlink" data-view="${t.id}">${esc(t.name)}</button>`;
+  const pb = p => `<span class="pn" data-player="${p.id}" title="Notes, news & details">${esc(p.name)}</span>`;
+  const rec = r => `${r.w}-${r.l}${r.t ? '-' + r.t : ''}`;
+  const day = t => A.fmtMD(new Date(t));
+  const top = (arr, f) => arr.reduce((a, b) => (a == null || f(b) > f(a) ? b : a), null);
+  const rows = F.rows.filter(r => r.games);
+  const g = F.games;
+  const wk = x => `Week ${x.period} vs ${esc(team(x.opp)?.name || '?')}`;
+
+  // ---- Superlatives
+  const aw = [];
+  const add = (label, who, stat, detail, bad = false) => aw.push(`<div class="award ${bad ? 'bad' : ''}"><small>${label}</small><span class="aw-stat">${stat}</span><span class="aw-who">${who}</span><span class="aw-detail">${detail}</span></div>`);
+  if (rows.length) {
+    const lucky = top(rows, r => r.luck), unlucky = top(rows, r => -r.luck);
+    if (lucky.luck > 0.05) add('Luckiest', tb(lucky.team), `${signed(lucky.luck, 1)} wins`, `${rec(lucky)}, but scored like a ${f1(lucky.expW)}-win team`);
+    if (unlucky.luck < -0.05) add('Unluckiest', tb(unlucky.team), `${signed(unlucky.luck, 1)} wins`, `${rec(unlucky)}, but scored like a ${f1(unlucky.expW)}-win team`, true);
+    const hi = top(g, x => x.s), lo = top(g, x => -x.s);
+    add('Highest-scoring week', tb(team(hi.id)), f0(hi.s), `${wk(hi)} (${hi.res === 'W' ? 'won' : 'lost'})`);
+    add('Lowest-scoring week', tb(team(lo.id)), f0(lo.s), `${wk(lo)} (${lo.res === 'W' ? 'still won' : 'lost'})`, true);
+    const losses = g.filter(x => x.res === 'L'), wins = g.filter(x => x.res === 'W');
+    const heart = top(losses, x => x.margin), robbed = top(losses, x => x.s);
+    const stole = top(wins, x => -x.s), blow = top(wins, x => x.margin);
+    if (heart) add('Heartbreaker', tb(team(heart.id)), `lost by ${f0(-heart.margin)}`, `${wk(heart)}: ${f0(heart.s)}–${f0(heart.os)}`, true);
+    if (robbed) add('Robbed', tb(team(robbed.id)), `${f0(robbed.s)} in a loss`, `Would have beaten ${robbed.beat} of ${robbed.field} teams that week. ${wk(robbed)}`, true);
+    if (stole) add('Stole one', tb(team(stole.id)), `${f0(stole.s)} in a win`, `Would have lost to ${stole.field - stole.beat} of ${stole.field} teams that week. ${wk(stole)}`);
+    if (blow) add('Biggest blowout', tb(team(blow.id)), `+${f0(blow.margin)}`, `${wk(blow)}: ${f0(blow.s)}–${f0(blow.os)}`);
+    const tops = top(rows, r => r.top);
+    if (tops.top > 1) add('Weekly top scorer', tb(tops.team), `${tops.top}×`, 'highest score in the league that week');
+    const tough = top(rows, r => r.pa / r.games), easy = top(rows, r => -r.pa / r.games);
+    add('Toughest schedule', tb(tough.team), `${f0(tough.pa / tough.games)}`, 'points against per week, most in the league', true);
+    add('Easiest schedule', tb(easy.team), `${f0(easy.pa / easy.games)}`, 'points against per week, fewest in the league');
+    const hot = top(rows, r => r.winStreak), cold = top(rows, r => r.loseStreak);
+    if (hot.winStreak >= 2) add('Hottest streak', tb(hot.team), `W${hot.winStreak}`, 'longest winning streak');
+    if (cold.loseStreak >= 2) add('Coldest streak', tb(cold.team), `L${cold.loseStreak}`, 'longest losing streak', true);
+  }
+  if (F.mvp?.pts > 0) add('Fantasy MVP', pb(F.mvp.p), `${f0(F.mvp.pts)} pts`, `most points so far, carrying ${esc(F.mvp.team.name)}`);
+  const hero = F.pickups[0];
+  if (hero) add('Waiver wire hero', pb(hero.p), `≈${f0(hero.pts)} pts`, `since ${esc(hero.team.name)} added them ${day(hero.at)}`);
+  const fleece = F.trades.find(t => !t.partial && t.share >= 0.1);
+  if (fleece) add('Most lopsided trade', tb(fleece.sides[1].team), signed(fleece.sides[1].net), `in a ${day(fleece.at)} deal with ${esc(fleece.sides[0].team.name)} (${signed(fleece.sides[0].net)}), so far + rest of season`, true);
+  const mv = m.teams.filter(t => t.moves?.adds != null);
+  if (mv.length) {
+    const addict = top(mv, t => t.moves.adds), chill = top(mv, t => -(t.moves.adds + (t.moves.lineup || 0)));
+    add('Waiver wire addict', tb(addict), `${addict.moves.adds} adds`, 'most pickups this season');
+    add('Set it and forget it', tb(chill), `${chill.moves.adds} adds`, `${chill.moves.lineup ?? 0} lineup moves all season`);
+    const dealer = top(mv, t => t.moves.trades || 0);
+    if (dealer.moves.trades > 0) add('Trade machine', tb(dealer), `${dealer.moves.trades} trade${dealer.moves.trades > 1 ? 's' : ''}`, 'most deals this season');
+  }
+  const ward = F.hurt[0];
+  if (ward?.n) add('Infirmary', tb(ward.team), `${ward.n} out`, `${f1(ward.fp)} FP/G sidelined right now`, true);
+
+  const span = F.weeks.length ? `regular season · week${F.weeks.length > 1 ? `s ${F.weeks[0]}–${F.weeks[F.weeks.length - 1]}` : ` ${F.weeks[0]}`}` : '';
+  const awards = `<section class="card"><h3>Season superlatives <span class="r muted small">${span}</span></h3>
+    ${aw.length ? `<div class="awards">${aw.join('')}</div>` : '<p class="muted">Superlatives start once week 1 is final.</p>'}</section>`;
+
+  // ---- Schedule luck
+  const luckRows = rows.slice().sort((a, b) => a.luck - b.luck).map(r => {
+    const mine = r.team.id === an.my.id;
+    const sch = x => `${esc(team(x.b).abbrev || team(x.b).name)} <span class="muted">${x.w}-${x.l}</span>`;
+    return `<tr class="${mine ? 'me' : ''}"><td>${tb(r.team)}</td><td class="num"><b>${rec(r)}</b></td>
+      <td class="num">${r.apW}-${r.apL}${r.apT ? '-' + r.apT : ''}</td><td class="num">${f1(r.expW)}</td>
+      <td class="num ${r.luck >= 0.5 ? 'up' : r.luck <= -0.5 ? 'down' : 'muted'}"><b>${signed(r.luck, 1)}</b></td>
+      <td class="num">${f0(r.pf / r.games)}</td><td class="num">${f0(r.pa / r.games)}</td>
+      <td class="small">${sch(r.bestSched)}</td><td class="small">${sch(r.worstSched)}</td>
+      <td class="num muted">${r.ahead != null ? f0(r.ahead) : '–'}</td></tr>`;
+  }).join('');
+  const luck = rows.length ? `<section class="card"><h3>Schedule luck <span class="r muted small">unluckiest first</span></h3>
+    <div class="scrollx"><table><thead><tr><th>Team</th><th class="num">Record</th>
+      <th class="num" title="Record if you played every team every week">All-play</th>
+      <th class="num" title="Wins you'd expect from your scores (all-play win rate × games)">Exp. W</th>
+      <th class="num" title="Actual wins minus expected wins">Luck</th>
+      <th class="num">PF/wk</th><th class="num" title="Points your opponents scored against you per week">PA/wk</th>
+      <th title="The other team's schedule that would give you the best record">Best sched.</th><th title="The schedule that would give you the worst record">Worst sched.</th>
+      <th class="num" title="Your remaining opponents' points per week so far (higher = tougher road)">Road ahead</th></tr></thead>
+      <tbody>${luckRows}</tbody></table></div>
+    <p class="muted small">All-play: every week, your score against every other team's. Luck = actual wins − wins your scores "deserved". Best / worst schedule: your record if you'd had that team's opponents.</p></section>` : '';
+
+  // ---- Schedule swap
+  const order = rows.slice().sort((a, b) => b.w - a.w || b.pf - a.pf).map(r => r.team);
+  const swapRows = order.map(a => `<tr class="${a.id === an.my.id ? 'me' : ''}"><td>${tb(a)}</td>${order.map(b => {
+    const x = F.swap[a.id][b.id], d = x.w - F.swap[a.id][a.id].w;
+    return `<td class="num ${a.id === b.id ? 'self' : ''}" title="${esc(a.name)} with ${esc(b.name)}'s schedule: ${x.w}-${x.l}${x.t ? '-' + x.t : ''}"><span class="heat h${Math.max(0, Math.min(5, d + 3))}">${x.w}-${x.l}</span></td>`;
+  }).join('')}</tr>`).join('');
+  const swap = rows.length ? `<section class="card"><h3>Schedule swap <span class="r muted small">your record with every team's schedule</span></h3>
+    <div class="scrollx"><table class="schedswap"><thead><tr><th>Team ↓ · schedule →</th>${order.map(b => `<th class="num" title="${esc(b.name)}'s schedule">${esc(b.abbrev || b.name)}</th>`).join('')}</tr></thead>
+      <tbody>${swapRows}</tbody></table></div>
+    <p class="muted small">Read across: each team's record had it played another team's opponents (when that team played you, you play them). Outlined = actual record. Green = better than actual, red = worse.</p></section>` : '';
+
+  // ---- Trade report card
+  const tradeCard = t => {
+    const [a, b] = t.sides;
+    const verdict = t.partial ? `<span class="muted small">${t.sides.length > 2 ? 'several deals at once, can’t tell who gave what' : 'the other side has since left rosters'}</span>`
+      : t.share < 0.05 ? '<b class="muted">Even so far</b>'
+      : a.net > 0 && b.net > 0 ? `<b class="up">Win-win, ${esc(a.team.name)} a bit more</b>`
+      : a.net < 0 && b.net < 0 ? `<b class="down">Lose-lose, ${esc(b.team.name)} hurt more</b>`
+      : `<b class="${t.share >= 0.25 ? 'down' : 'up'}">${t.share >= 0.25 ? 'Fleeced: ' : ''}${esc(a.team.name)} won it</b>`;
+    return `<div class="trade"><div class="tr-top"><span class="muted small">${day(t.at)}</span>${verdict}</div>
+      <div class="tr-sides">${t.sides.map((s, i) => `<div class="tr-side ${!t.partial && i === 0 && t.share >= 0.05 && s.net > 0 ? 'win' : ''}">
+        <div>${tb(s.team)} <span class="muted small">got</span></div>
+        ${s.got.map(x => `<div class="tr-p">${pb(x.p)}<span class="muted small">≈${f0(x.since)} pts since · ${f1(x.v)} proj/G</span></div>`).join('')}
+        ${t.partial ? '' : `<div class="tr-tot"><span class="${s.net >= 0 ? 'up' : 'down'}">${signed(s.net)}</span> <small class="muted">so far ${signed(s.sofar)} · ROS ${signed(s.ros)}</small></div>`}</div>`).join('')}</div></div>`;
+  };
+  const trades = `<section class="card"><h3>Trade report card <span class="r muted small">most lopsided first</span></h3>
+    ${F.trades.length ? F.trades.map(tradeCard).join('') : '<p class="muted">No trades this season (that are still on rosters).</p>'}
+    <p class="muted small">Graded like the trade analyzer, for each side. So far = points the players it got have scored since the trade minus what it gave away scored (estimated from games played and their average since; an extra body is charged at a top free agent's rate). ROS = its projected points the ${horizon()} with the trade vs with it undone, lineup-aware, with the best free agent filling any open spot. Rebuilt from rosters (players who arrived by trade at the same moment), so a piece later dropped or flipped isn't shown.</p></section>`;
+
+  // ---- Waiver wire heroes
+  const picks = F.pickups.slice(0, 8).map((x, i) => `<div class="pick"><span class="rk">${i + 1}</span>${pCell(x.p)}
+      <div class="meta">${f1(x.avg)} FP/G<br><small>${esc(x.team.name)} · ${day(x.at)}</small></div><div class="gain">${f0(x.pts)}</div></div>`).join('');
+  const heroes = `<section class="card"><h3>Waiver wire heroes <span class="r muted small">points since pickup (est.)</span></h3>
+    ${picks || '<p class="muted">No pickups with games played yet.</p>'}</section>`;
+
+  // ---- Manager file
+  const files = mv.length ? `<section class="card"><h3>The manager file <span class="r muted small">season moves</span></h3>
+    <div class="scrollx"><table><thead><tr><th>Team</th><th class="num">Adds</th><th class="num">Drops</th><th class="num">Trades</th><th class="num">IR moves</th><th class="num">Lineup moves</th></tr></thead><tbody>
+    ${mv.slice().sort((a, b) => b.moves.adds - a.moves.adds).map(t => `<tr class="${t.id === an.my.id ? 'me' : ''}"><td>${tb(t)}</td><td class="num"><b>${t.moves.adds}</b></td><td class="num">${t.moves.drops ?? '–'}</td><td class="num">${t.moves.trades ?? '–'}</td><td class="num">${t.moves.ir ?? '–'}</td><td class="num">${t.moves.lineup ?? '–'}</td></tr>`).join('')}
+    </tbody></table></div></section>` : '';
+
+  return `${awards}${luck}${swap}<div class="grid2">${trades}<div>${heroes}${files}</div></div>`;
 }
 
 // ---- Player power rankings
@@ -1547,7 +1674,7 @@ function vBody() {
   if (state.tab === 'settings') return vSettings();
   if (state.error) return `<div class="card err empty"><h2>Couldn't load your league</h2><p>${esc(state.error)}</p><div class="row" style="justify-content:center"><button class="btn primary" data-act="refresh">Try again</button><button class="btn" data-tab="settings">Settings</button></div></div>`;
   if (!state.model) return `<div class="empty"><h2>LinedUp<em>Better</em></h2><p>Connect your ESPN league to get started.</p><div class="row" style="justify-content:center"><button class="btn primary" data-tab="settings">Connect league</button><button class="btn" data-act="demo">Try demo</button></div></div>`;
-  return { overview: vOverview, roster: vRoster, matchups: vMatchups, slate: vSlate, waivers: vWaivers, players: vPlayers, trade: vTrade, injuries: vInjuries, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague }[state.tab]();
+  return { overview: vOverview, roster: vRoster, matchups: vMatchups, slate: vSlate, waivers: vWaivers, players: vPlayers, trade: vTrade, injuries: vInjuries, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague, fun: vFun }[state.tab]();
 }
 
 function render() {

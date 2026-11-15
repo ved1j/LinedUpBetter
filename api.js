@@ -213,8 +213,14 @@ function normalize(L, P, F, season, leagueId) {
       pf: rec.pointsFor || t.points || 0, pa: rec.pointsAgainst || 0,
       seed: t.playoffSeed || null,
       acq: t.transactionCounter?.matchupAcquisitionTotals || {},
+      // Season move counts (for the Fun tab); null when ESPN doesn't send them.
+      moves: {
+        adds: t.transactionCounter?.acquisitions ?? null, drops: t.transactionCounter?.drops ?? null,
+        trades: t.transactionCounter?.trades ?? null, ir: t.transactionCounter?.moveToIR ?? null,
+        lineup: t.transactionCounter?.moveToActive ?? null,
+      },
       roster: (t.roster?.entries || [])
-        .map(e => normPlayer(e.playerPoolEntry?.player, { slot: e.lineupSlotId, season, pts }))
+        .map(e => normPlayer(e.playerPoolEntry?.player, { slot: e.lineupSlotId, season, pts, acqType: e.acquisitionType, acqDate: e.acquisitionDate }))
         .filter(Boolean),
     };
   });
@@ -356,7 +362,7 @@ function applyPlayedDays(periods, schedule, currentPeriod, day1) {
   }
 }
 
-function normPlayer(p, { slot = null, status = null, season, pts }) {
+function normPlayer(p, { slot = null, status = null, season, pts, acqType = null, acqDate = null }) {
   if (!p) return null;
   const stats = {};
   for (const s of p.stats || []) {
@@ -400,6 +406,9 @@ function normPlayer(p, { slot = null, status = null, season, pts }) {
     ownedChange: p.ownership?.percentChange ?? null,
     slot,
     status,
+    // How and when the current team got them: DRAFT, ADD (waivers / free agency) or TRADE.
+    acqType: acqType || null,
+    acqDate: Number.isFinite(acqDate) ? acqDate : null,
     stats,
   };
 }

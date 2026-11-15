@@ -1402,3 +1402,147 @@ export function playerRankings(m, basis) {
   for (const r of rows.values()) r.pre = r.p.espnRank || (r.p.adp ? Math.round(r.p.adp) : null);
   return [...rows.values()];
 }
+
+// ---- Fun: superlatives, schedule luck, schedule swap, trade report card, waiver heroes
+// Matchup stats use completed regular-season weeks. Trades are rebuilt from current
+// rosters: players who arrived by trade at the same moment were one deal (a piece that
+// was later dropped or flipped is missing). Points "since" are estimates: team games
+// since then × how often the player has played × his average over that stretch.
+const spOfTime = (m, t) => Math.floor((t - new Date(m.day1 + 'T00:00:00').getTime()) / 86400000) + 1;
+export function pointsSince(m, p, sinceSP) {
+  const games = m.proTeams[p.proTeamId]?.games || {};
+  let all = 0, since = 0;
+  for (let sp = 1; sp < m.currentSP; sp++) if (games[sp]) { all++; if (sp >= sinceSP) since++; }
+  const s = p.stats || {};
+  const rate = all ? Math.min(1, (s.season?.gp || 0) / all) : 0;
+  const g = since * rate;
+  const days = m.currentSP - sinceSP;
+  const win = days <= 7 ? s.l7 : days <= 15 ? s.l15 : days <= 30 ? s.l30 : s.season;
+  const avg = Number.isFinite(win?.avg) && win.gp ? win.avg : Number.isFinite(s.season?.avg) ? s.season.avg : 0;
+  return { games: g, pts: g * avg, avg };
+}
+export function funStats(m, basis) {
+  const team = id => m.teams.find(t => t.id === id);
+  const ids = m.teams.map(t => t.id);
+  const done = m.matchups.filter(x => x.period <= m.regularPeriods && x.home && x.away && x.winner && x.winner !== 'UNDECIDED');
+  const weeks = [...new Set(done.map(x => x.period))].sort((a, b) => a - b).map(period => {
+    const score = {}, opp = {};
+    for (const x of done) if (x.period === period) {
+      score[x.home.teamId] = x.home.pts; score[x.away.teamId] = x.away.pts;
+      opp[x.home.teamId] = x.away.teamId; opp[x.away.teamId] = x.home.teamId;
+    }
+    return { period, score, opp, ids: Object.keys(score).map(Number) };
+  });
+
+  // Records, all-play (vs every team every week), luck, streaks.
+  const rows = new Map(ids.map(id => [id, { team: team(id), w: 0, l: 0, t: 0, apW: 0, apL: 0, apT: 0, expW: 0, games: 0, pf: 0, pa: 0, top: 0, bottom: 0, results: [] }]));
+  const games = [];
+  for (const wk of weeks) {
+    const sc = wk.ids.map(i => wk.score[i]);
+    const hi = Math.max(...sc), lo = Math.min(...sc);
+    for (const id of wk.ids) {
+      const r = rows.get(id), s = wk.score[id], o = wk.opp[id], os = wk.score[o];
+      const res = s > os ? 'W' : s < os ? 'L' : 'T';
+      r.games++; r.pf += s; r.pa += os;
+      r[res === 'W' ? 'w' : res === 'L' ? 'l' : 't']++;
+      let bw = 0, bl = 0, bt = 0;
+      for (const j of wk.ids) if (j !== id) { if (s > wk.score[j]) bw++; else if (s < wk.score[j]) bl++; else bt++; }
+      r.apW += bw; r.apL += bl; r.apT += bt;
+      r.expW += (bw + bt / 2) / Math.max(1, wk.ids.length - 1);
+      if (s === hi) r.top++;
+      if (s === lo) r.bottom++;
+      r.results.push(res);
+      games.push({ id, period: wk.period, s, os, opp: o, res, margin: s - os, beat: bw, field: wk.ids.length - 1 });
+    }
+  }
+  const streak = (res, k) => { let best = 0, cur = 0; for (const x of res) { cur = x === k ? cur + 1 : 0; best = Math.max(best, cur); } return best; };
+  for (const r of rows.values()) {
+    r.luck = r.w + r.t / 2 - r.expW;
+    r.winStreak = streak(r.results, 'W'); r.loseStreak = streak(r.results, 'L');
+  }
+
+  // Schedule swap: team a's record against team b's schedule (when b played a, a plays b).
+  const swap = {};
+  for (const a of ids) {
+    swap[a] = {};
+    for (const b of ids) {
+      let w = 0, l = 0, t = 0;
+      for (const wk of weeks) {
+        if (wk.score[a] == null || wk.score[b] == null) continue;
+        const o = wk.opp[b] === a ? b : wk.opp[b];
+        if (wk.score[o] == null) continue;
+        if (wk.score[a] > wk.score[o]) w++; else if (wk.score[a] < wk.score[o]) l++; else t++;
+      }
+      swap[a][b] = { w, l, t };
+    }
+  }
+  for (const r of rows.values()) {
+    const recs = ids.map(b => ({ b, ...swap[r.team.id][b] }));
+    r.bestSched = recs.reduce((x, y) => (y.w > x.w ? y : x));
+    r.worstSched = recs.reduce((x, y) => (y.w < x.w ? y : x));
+  }
+  // Road ahead: remaining opponents' points per week so far.
+  const pfWk = id => { const r = rows.get(id); return r.games ? r.pf / r.games : null; };
+  for (const r of rows.values()) {
+    const opps = m.matchups.filter(x => x.period >= m.currentPeriod && x.period <= m.regularPeriods && x.home && x.away && hasTeam(x, r.team.id))
+      .map(x => (x.home.teamId === r.team.id ? x.away.teamId : x.home.teamId)).map(pfWk).filter(v => v != null);
+    r.ahead = opps.length ? opps.reduce((a, b) => a + b, 0) / opps.length : null;
+  }
+
+  // Trades rebuilt from rosters, graded like the trade analyzer, for each side:
+  //  - rest of season: lineup-aware projection of its roster now vs with the trade undone
+  //    (an uneven deal's open spot filled by the best free agent, extra bodies dropped);
+  //  - so far: points the players it got have scored since, minus what it gave away
+  //    scored, with each extra body charged at replacement level (best free agent).
+  const worth = p => {
+    const since = pointsSince(m, p, spOfTime(m, p.acqDate));
+    return { p, since: since.pts, sinceG: since.games, v: value(p, basis) };
+  };
+  const owned = [];
+  for (const t of m.teams) for (const p of t.roster) owned.push({ p, t });
+  const arrivals = owned.filter(x => x.p.acqType === 'TRADE' && x.p.acqDate).sort((a, b) => a.p.acqDate - b.p.acqDate);
+  const deals = [];
+  for (const x of arrivals) {
+    const last = deals[deals.length - 1];
+    if (last && x.p.acqDate - last.at <= 5 * 60000) last.items.push(x); else deals.push({ at: x.p.acqDate, items: [x] });
+  }
+  const ex = exactScorer(m, basis), ctx = seasonContext(m, basis, 48);
+  const rep = (m.poolFAs || m.freeAgents || []).filter(p => !isOut(p)).reduce((a, p) => Math.max(a, value(p, basis)), 0);
+  const trades = deals.map(d => {
+    const bySide = new Map();
+    for (const { p, t } of d.items) (bySide.get(t.id) || bySide.set(t.id, { team: t, got: [] }).get(t.id)).got.push(worth(p));
+    const sides = [...bySide.values()].map(s => ({ ...s, since: s.got.reduce((a, x) => a + x.since, 0) }));
+    // One side only (the rest was dropped or flipped), or several trades processed at the
+    // same moment: we can't tell who gave what, so no verdict.
+    if (sides.length !== 2) return { at: d.at, sides, partial: true, margin: null, share: null };
+    const grade = (me, them) => {
+      const r = me.got.length, g = them.got.length;
+      const fill = r > g ? { fas: rankFillins(m, me.team, basis, ctx.S), S: x => ex(x, me.team), k: 4 } : null;
+      const undo = applyTrade(me.team.roster, me.got.map(x => x.p), them.got.map(x => x.p), basis, fill).after;
+      const ros = ex(me.team.roster, me.team) - ex(undo, me.team);
+      const games = [...me.got, ...them.got].reduce((a, x) => a + x.sinceG, 0) / (r + g);
+      const sofar = me.since - them.since - (r - g) * rep * games;
+      return { ros, sofar, net: ros + sofar };
+    };
+    const [a, b] = sides;
+    const ga = grade(a, b), gb = grade(b, a);
+    Object.assign(a, ga); Object.assign(b, gb);
+    sides.sort((x, y) => y.net - x.net);
+    const margin = sides[0].net - sides[1].net;
+    const scale = sides.reduce((acc, s) => acc + Math.abs(s.ros) + s.since, 0) || 1;
+    return { at: d.at, sides, partial: false, margin, share: margin / scale };
+  }).sort((x, y) => (y.margin ?? -1) - (x.margin ?? -1));
+
+  // Waiver wire heroes: rostered players picked up off waivers / free agency.
+  const pickups = owned.filter(x => x.p.acqDate && x.p.acqType && x.p.acqType !== 'DRAFT' && x.p.acqType !== 'TRADE')
+    .map(({ p, t }) => { const s = pointsSince(m, p, spOfTime(m, p.acqDate)); return { p, team: t, at: p.acqDate, pts: s.pts, games: s.games, avg: s.avg }; })
+    .filter(x => x.games >= 1).sort((a, b) => b.pts - a.pts);
+
+  // Fantasy MVP: most points so far by a rostered player.
+  const mvp = owned.map(({ p, t }) => ({ p, team: t, pts: (p.stats?.season?.avg || 0) * (p.stats?.season?.gp || 0) })).sort((a, b) => b.pts - a.pts)[0] || null;
+  // Infirmary: production sidelined right now.
+  const hurt = m.teams.map(t => { const out = t.roster.filter(isOut); return { team: t, n: out.length, fp: out.reduce((a, p) => a + value(p, basis), 0) }; })
+    .sort((a, b) => b.fp - a.fp);
+
+  return { weeks: weeks.map(w => w.period), rows: [...rows.values()], swap, games, trades, pickups, mvp, hurt };
+}
