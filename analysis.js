@@ -382,6 +382,38 @@ export function dayValue(m, p, sp, basis) {
   return v * dtdFactor(m, p, sp) * dayFactor(m, p, sp, basis, v);
 }
 
+// ---- Week rollover
+// ESPN keeps a finished matchup as the current one until it rolls over overnight. Once
+// every game on the matchup's last day is over (tipped off 3+ hours ago), there's nothing
+// left to play or plan in it, so the next matchup becomes current: its first day is
+// "today", the finished week is decided from the final scores (ESPN records results
+// overnight) and team records and points for/against count it (ESPN adds both at the same
+// time, overnight). Returns the week that ended, or null. Calling it
+// again does nothing.
+const GAME_MS = 3 * 3600e3;
+export function rollWeek(m, now = Date.now()) {
+  const id = m.currentPeriod, days = m.periods[id] || [], next = m.periods[id + 1];
+  if (!days.length || !next?.length || m.currentSP !== days[days.length - 1]) return null;
+  const games = Object.values(m.proTeams).map(t => t.games?.[m.currentSP]).filter(Boolean);
+  if (games.some(g => !g.start || g.start + GAME_MS > now)) return null;
+  const team = tid => m.teams.find(t => t.id === tid);
+  for (const x of m.matchups) {
+    if (x.period !== id || !x.home || !x.away || (x.winner && x.winner !== 'UNDECIDED')) continue;
+    const h = x.home.pts || 0, a = x.away.pts || 0;
+    x.winner = h > a ? 'HOME' : a > h ? 'AWAY' : 'TIE';
+    const th = team(x.home.teamId), ta = team(x.away.teamId);
+    if (!th || !ta) continue;
+    th.pf = (th.pf || 0) + h; th.pa = (th.pa || 0) + a;
+    ta.pf = (ta.pf || 0) + a; ta.pa = (ta.pa || 0) + h;
+    if (x.winner === 'TIE') { th.ties = (th.ties || 0) + 1; ta.ties = (ta.ties || 0) + 1; }
+    else { const [w, l] = x.winner === 'HOME' ? [th, ta] : [ta, th]; w.wins++; l.losses++; }
+  }
+  m.rolledFrom = id;
+  m.currentPeriod = id + 1;
+  m.currentSP = next[0];
+  return id;
+}
+
 // ---- Today's lineup vs the best possible one
 export function lineupCheck(m, team, basis) {
   const sp = m.currentSP;
@@ -948,7 +980,8 @@ export function analyze(m, basis = 'smart') {
 
   const lc = off ? null : lineupCheck(m, my, basis);
   if (lc && lc.gain >= 1 && lc.start.length) {
-    note('bad', 'Today', `Set your lineup: +${Math.round(lc.gain)} pts today`,
+    const when = m.rolledFrom && spDate(m, m.currentSP).toDateString() !== new Date().toDateString() ? 'tomorrow' : 'today';
+    note('bad', when === 'today' ? 'Today' : 'Tomorrow', `Set your lineup: +${Math.round(lc.gain)} pts ${when}`,
       [`Start ${lc.start.map(p => p.name).join(', ')}${lc.intoOpen ? (lc.sit.length ? '' : ' (open slots, no one needs to sit)') : ''}`,
         lc.sit.length ? `bench ${lc.sit.map(p => `${p.name} (${lc.why(p)})`).join(', ')}` : ''].filter(Boolean).join('; ') + '.');
   }

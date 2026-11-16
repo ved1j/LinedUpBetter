@@ -235,6 +235,8 @@ async function load(force = false) {
         await store.set(key, { at: Date.now(), model });
       }
     }
+    // Last games of the week are over: move on to the next matchup (ESPN only rolls over overnight).
+    A.rollWeek(model);
     // Main team: the one you starred, else your ESPN login's team, else the first team.
     const has = id => id != null && model.teams.some(t => t.id === +id);
     let tid = starredTeam() ?? (s.demo ? model.myTeamId : s.teamId);
@@ -879,23 +881,26 @@ function vLineupCard() {
   const { an, model: m } = state;
   const lc = an.lineup;
   const today = A.fmtDow(A.spDate(m, m.currentSP)) + ' ' + A.fmtMD(A.spDate(m, m.currentSP));
-  if (an.off) return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today}</span></h3>
+  // After a week rollover the first day of the next matchup may still be tomorrow.
+  const dw = m.rolledFrom && A.spDate(m, m.currentSP).toDateString() !== new Date().toDateString() ? 'tomorrow' : 'today';
+  const Dw = dw === 'today' ? 'Today' : 'Tomorrow';
+  if (an.off) return `<section class="card lineup ok"><h3>${Dw}'s lineup <span class="r muted small">${today}</span></h3>
       <p class="okline">${esc(an.off.title)}: ${esc(an.off.detail)}</p></section>`;
   if (!lc) return '';
   const asOf = m.fetchedAt ? `ESPN lineup as of ${new Date(m.fetchedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` : 'ESPN lineup';
   if (lc.gain < 1 || !lc.start.length) {
-    return `<section class="card lineup ok"><h3>Today's lineup <span class="r muted small">${today} · ${asOf}</span></h3>
-      <p class="okline">✓ Optimal: your starters are the best lineup for today's games (≈${f0(lc.best)} pts).</p></section>`;
+    return `<section class="card lineup ok"><h3>${Dw}'s lineup <span class="r muted small">${today} · ${asOf}</span></h3>
+      <p class="okline">✓ Optimal: your starters are the best lineup for ${dw}'s games (≈${f0(lc.best)} pts).</p></section>`;
   }
   const li = (ps, cls, note) => ps.map(p => `<li class="${cls}">${pCell(p)}<span class="num muted small">${note(p)}</span></li>`).join('');
-  const startNote = p => `${f1(A.dayValue(m, p, m.currentSP, state.settings.basis))} proj today`;
-  return `<section class="card lineup"><h3>Today's lineup <span class="r muted small">${today} · ESPN lineup vs best possible</span></h3>
+  const startNote = p => `${f1(A.dayValue(m, p, m.currentSP, state.settings.basis))} proj ${dw}`;
+  return `<section class="card lineup"><h3>${Dw}'s lineup <span class="r muted small">${today} · ESPN lineup vs best possible</span></h3>
     <div class="swap">
       <div><div class="rk-label">Start</div><ul class="plist">${li(lc.start, 'in', startNote)}</ul></div>
-      <div class="gainbox"><b>+${f0(lc.gain)}</b><span>pts today</span></div>
+      <div class="gainbox"><b>+${f0(lc.gain)}</b><span>pts ${dw}</span></div>
       <div><div class="rk-label">Bench</div><ul class="plist">${li(lc.sit, 'out', p => lc.why(p)) || `<li class="muted small">Nobody: ${lc.intoOpen === 1 ? 'there\'s an open slot' : 'there are open slots'} for them.</li>`}</ul></div>
     </div>
-    <p class="muted small">Based on your ${asOf}, today's NBA games and position rules. Changed your lineup on ESPN? Hit ↻ to refresh.</p></section>`;
+    <p class="muted small">Based on your ${asOf}, ${dw}'s NBA games and position rules. Changed your lineup on ESPN? Hit ↻ to refresh.</p></section>`;
 }
 
 function vPlanCard() {
@@ -1998,6 +2003,14 @@ function vBody() {
   return { overview: vOverview, roster: vRoster, matchups: vMatchups, slate: vSlate, waivers: vWaivers, players: vPlayers, trade: vTrade, injuries: vInjuries, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague, fun: vFun }[state.tab]();
 }
 
+// After the week rolled over early (see A.rollWeek), say so on the day-to-day tabs.
+function vRollBar() {
+  const m = state.model;
+  if (!m.rolledFrom || !['overview', 'roster', 'matchups', 'slate', 'waivers'].includes(state.tab)) return '';
+  const d = A.spDate(m, m.currentSP);
+  return `<div class="rollbar"><b>${wkName(m.rolledFrom)} is over</b>, so this shows ${wkName(m.currentPeriod)} (starts ${A.fmtDow(d)}, ${A.fmtMD(d)}). Last week's results use the final scores; ESPN makes them official overnight.</div>`;
+}
+
 // Shown on tabs whose numbers follow your focus matchups, so it's never a surprise.
 function vFocusBar() {
   const f = focusLeft();
@@ -2012,7 +2025,7 @@ function render() {
   const app = document.getElementById('app');
   const scroll = document.querySelector('main')?.scrollTop || 0;
   let body;
-  try { body = (state.model && state.an ? vFocusBar() : '') + vBody(); } catch (e) { console.error(e); body = `<div class="card err">Something broke rendering this tab: ${esc(e.message)}</div>`; }
+  try { body = (state.model && state.an ? vRollBar() + vFocusBar() : '') + vBody(); } catch (e) { console.error(e); body = `<div class="card err">Something broke rendering this tab: ${esc(e.message)}</div>`; }
   let drawer = '';
   try { drawer = state.model && state.openPlayer != null ? vDrawer() : ''; } catch (e) { console.error(e); }
   app.innerHTML = vHeader() + `<main>${body}</main>` + drawer;

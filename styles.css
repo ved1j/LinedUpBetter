@@ -616,3 +616,6 @@ table.tlineup tr.gone td { opacity: .55; }
 table.tlineup tr.incoming td:first-child { box-shadow: inset 2px 0 0 var(--volt); }
 table.tlineup tfoot td { padding-top: 8px; }
 .wklink { text-align: left; text-transform: none; letter-spacing: 0; font-family: var(--body); font-size: 13px; }
+
+/* Week rolled over early */
+.rollbar { border: 1px solid var(--line-2); border-left: 2px solid var(--info); border-radius: 8px; padding: 8px 12px; margin: 0 0 12px; font-size: 12.5px; line-height: 1.45; }
