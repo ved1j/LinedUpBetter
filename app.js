@@ -1365,7 +1365,7 @@ function vFocusPlan() {
   const targets = sc?.status === 'done' ? sc.targets.slice(0, 4).map(x => `<div class="pick">${pCell(x.p)}<div class="meta"><button class="tlink small" data-view="${x.owner.id}">${esc(x.owner.name)}</button><br>${f1(A.marketValue(m, x.p, state.settings.basis))}<small> trade value</small></div>
       <div class="gain">${signed(x.gain)}</div><button class="btn mini" data-act="target" data-id="${x.p.id}">Find a deal</button></div>`).join('') : '';
   return `<section class="card" id="focusplan"><h3>Focus trade plan <span class="r muted small">${plan.periods.map(wkName).join(', ')}</span></h3>
-    <p class="small" style="margin:0 0 12px">Other managers pay for a whole season, but you only need your focus weeks. Trade away players worth more to them than to you, for players who fill your empty nights in those weeks.</p>
+    <p class="small" style="margin:0 0 12px">Other managers pay for a whole season, but you only need your focus weeks. Trade away players worth more to them than to you, for players who fill your empty nights in those weeks. Losing a deal on paper, or for the weeks after, is fine: only your focus weeks count, so trade ideas and the finder will happily overpay on names and per-game value when it wins you those weeks.</p>
     <div class="rk-label">Your lineup in those weeks</div><div class="fweeks">${weeks}</div>
     <div class="rk-label" style="margin-top:12px">Trade away</div>
     ${rows ? `<div class="scrollx"><table><thead><tr><th>Player</th><th class="num" title="Games in your focus weeks">Focus G</th><th class="num" title="Games he'd start">Starts</th><th class="num" title="Games on your bench because the lineup's full that night">Benched</th><th class="num" title="Games missed injured">Out</th><th class="num" title="Points he adds to your lineup in your focus weeks / what his trade value would suggest">Adds / ~expected</th><th class="num" title="Trade value: name + form">Trade value</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -1422,8 +1422,12 @@ function vTrade() {
     const odds = ratio >= 0.97 ? ['likely', 'up', 'they get as much name value as they give'] : ratio >= 0.88 ? ['possible', 'muted', 'close on name value, expect a counter'] : ['unlikely', 'down', 'they give up a bigger name than they get'];
     // Focus matchups: win chance in each before and after (the partner's roster changes
     // too, which matters when you play them in one of those weeks).
-    let focusBlock = '', fWins = null;
+    let focusBlock = '', fWins = null, otherWks = 0;
     if (focusLeft()) {
+      // The same trade on your whole season: the difference is what it does to the weeks
+      // outside your focus, which don't count.
+      const all = A.tradeImpact(m, an.my, give, get, b, true, false);
+      otherWks = net(all, 'ros') + net(all, 'po') - (net(a, 'ros') + net(a, 'po'));
       const rosters = { [an.my.id]: a.roster, ...(z ? { [partner.id]: z.roster } : {}) };
       const was = A.focusOdds(m, an.my.id, b), now = A.focusOdds(m, an.my.id, b, rosters);
       const wp = x => (x.opp ? pct(x.winProb) : '–');
@@ -1440,12 +1444,13 @@ function vTrade() {
     const good = fWins != null && Math.abs(fWins) >= 0.005 ? fWins > 0 : verdict > 0;
     result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
         ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${playoffsOn() ? row('Fantasy playoffs', 'po') : `<tr><td>Fantasy playoffs</td><td class="num muted" colspan="${z ? 2 : 1}">not counted</td></tr>`}
-        <tr class="sum"><td>Proj/G swapped</td><td class="num">${d(vGive, vGet)}</td>${z ? `<td class="num">${d(vGet, vGive)}</td>` : ''}</tr>
+        ${focusLeft() ? `<tr class="ignored"><td title="What the trade does to your weeks outside your focus matchups. They count for nothing, so this is left out of everything.">Your other weeks <span class="small">(don't count)</span></td><td class="num">${signed(otherWks)}</td>${z ? '<td class="num">–</td>' : ''}</tr>` : ''}
+        <tr class="sum ${focusLeft() ? 'ignored' : ''}"><td ${focusLeft() ? 'title="Per game over the whole season: doesn’t matter for your focus weeks"' : ''}>Proj/G swapped</td><td class="num">${focusLeft() ? signed(vGet - vGive, 1) : d(vGive, vGet)}</td>${z ? `<td class="num">${focusLeft() ? signed(vGive - vGet, 1) : d(vGet, vGive)}</td>` : ''}</tr>
         <tr class="sum"><td title="Name + form: draft position, last season, ESPN projection and this season (free-agent fill-ins included)">Trade value swapped</td><td class="num">${d(mGive, mGet)}</td>${z ? `<td class="num">${d(mGet, mGive)}</td>` : ''}</tr>
       </tbody></table>
       ${focusBlock}
       ${z ? `<p class="small" style="margin:10px 0 0">Acceptance: <b class="${odds[1]}">${odds[0]}</b> <span class="muted">— ${odds[2]} (trade value ${f1(mGive)} for ${f1(mGet)}).</span></p>` : ''}
-      <p class="verdict ${good ? 'up' : 'down'}">${good ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${fWins != null ? `${signed(fWins, 2)} expected wins in your focus matchups (${signed(verdict)} projected points in them)` : `${signed(verdict)} projected points, ${horizon()}`}.</p><p class="muted small" style="margin-top:4px">${focusLeft() ? `Your column counts only your focus matchups${z ? `; ${esc(poss(partner.name))} covers the ${playoffsOn() ? 'rest of their season + playoffs' : 'rest of their regular season'}` : ''}.` : `Bye weeks count for nothing on either side${playoffsOn() ? ' (a likely first-round playoff bye counts for little)' : ''}.`}
+      <p class="verdict ${good ? 'up' : 'down'}">${good ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${fWins != null ? `${signed(fWins, 2)} expected wins in your focus matchups (${signed(verdict)} projected points in them)` : `${signed(verdict)} projected points, ${horizon()}`}.</p><p class="muted small" style="margin-top:4px">${focusLeft() ? `Your column counts only your focus matchups${z ? `; ${esc(poss(partner.name))} covers the ${playoffsOn() ? 'rest of their season + playoffs' : 'rest of their regular season'}` : ''}.${otherWks < -10 ? ` You lose ${f0(-otherWks)} projected points in your other weeks, which is fine: they don't count.` : ''}` : `Bye weeks count for nothing on either side${playoffsOn() ? ' (a likely first-round playoff bye counts for little)' : ''}.`}
         ${z ? `<span class="muted">${esc(partner.name)}: ${signed(theirs2)}${verdict > 0 && theirs2 > 0 ? ' — good for both, easy sell.' : verdict > 0 && vGive >= vGet * 0.97 ? ' — looks fair to them on paper.' : ''}</span>` : ''}</p>
       ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}. A team left a player short fills the spot with the best free agent for its lineup.</p>` : ''}
       ${faNote.length ? `<p class="muted small">${faNote.join('; ')}. That part isn't counted above, since it doesn't need the trade.</p>` : ''}`;

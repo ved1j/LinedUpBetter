@@ -750,11 +750,11 @@ function faAloneMemo(memo, team, adds, basis, S, base) {
 }
 
 // Projected points for a team before/after a trade, in each window.
-export function tradeImpact(m, team, give, get, basis, mine = true) {
+export function tradeImpact(m, team, give, get, basis, mine = true, useFocus = true) {
   const before = team.roster;
   // Pick any free-agent fill-in on every remaining day, exactly like the trade ideas do.
   const days = futureDays(m);
-  const tw = dayWeights(m, team.id, basis).sp;
+  const tw = dayWeights(m, team.id, basis, useFocus).sp;
   const S = r => projectDays(m, r, days, basis, false, tw).total;
   const exclude = mine ? m.banned || null : null;
   const { after, drops, adds } = applyTrade(before, give, get, basis, { fas: rankFillins(m, team, basis, S, exclude), S, k: 4, exclude });
@@ -1115,6 +1115,11 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
   const paper = ps => ps.reduce((a, p) => a + Math.max(0, marketValue(m, p, basis)) ** 1.2, 0);
   const fillOf = ctx.fillOf || (ctx.fillOf = makeFills(m, my, basis, ctx.S, false));
   const faMemo = ctx.faMemo || (ctx.faMemo = new Map());
+  // With focus matchups you only need a few weeks, so you can happily "lose" a deal on
+  // per-game value (a 40 FP/G star with 2 games in those weeks for a 22 with 4 a week).
+  // The deal-shape bands below then reach much further toward you overpaying; whether it
+  // helps is still decided on your focus weeks, and whether they'd say yes on trade value.
+  const over = focusPeriods(m, my.id) ? 1.8 : 1;
   const out = [];
   const consider = (give, get) => {
     const a = applyTrade(my.roster, give, get, basis, fillOf(my));
@@ -1137,21 +1142,21 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
   };
   if (types.includes('1for1')) for (const a of mine) for (const b of theirs) {
     const r = v(b) / Math.max(1, v(a));
-    if (r >= 0.75 && r <= 1.35) consider([a], [b]);
+    if (r >= 0.75 / over && r <= 1.35) consider([a], [b]);
   }
   const mine9 = mine.slice(0, 9);
   if (types.includes('2for1')) for (let i = 0; i < mine9.length; i++) for (let j = i + 1; j < mine9.length; j++) {
     const two = v(mine9[i]) + v(mine9[j]);
     for (const b of theirs.slice(0, 6)) {
       // 2-for-1: the single player is better than either, worth 60–90% of the pair.
-      if (v(b) <= Math.max(v(mine9[i]), v(mine9[j])) || v(b) > 0.9 * two || v(b) < 0.6 * two) continue;
+      if (v(b) <= Math.max(v(mine9[i]), v(mine9[j])) || v(b) > 0.9 * two || v(b) < 0.6 * two / over) continue;
       consider([mine9[i], mine9[j]], [b]);
     }
   }
   const theirs9 = theirs.slice(0, 9);
   if (types.includes('1for2')) for (const a of mine.slice(0, 6)) for (let i = 0; i < theirs9.length; i++) for (let j = i + 1; j < theirs9.length; j++) {
     const two = v(theirs9[i]) + v(theirs9[j]);
-    if (v(a) <= Math.max(v(theirs9[i]), v(theirs9[j])) || v(a) > 0.9 * two || v(a) < 0.6 * two) continue;
+    if ((over === 1 && v(a) <= Math.max(v(theirs9[i]), v(theirs9[j]))) || v(a) > 0.9 * two * over || v(a) < 0.6 * two) continue;
     consider([a], [theirs9[i], theirs9[j]]);
   }
   if (types.includes('2for2')) {
@@ -1159,7 +1164,7 @@ export function tradeIdeasWith(m, my, other, basis, ctx, myBase, types = DEAL_TY
     const pairs = list => list.slice(0, 5).flatMap((a, i, l) => l.slice(i + 1).map(b => [a, b]));
     for (const g of pairs(mine)) for (const t of pairs(theirs)) {
       const r = sum(t) / Math.max(1, sum(g));
-      if (r >= 0.85 && r <= 1.18) consider(g, t);
+      if (r >= 0.85 / over && r <= 1.18) consider(g, t);
     }
   }
   // Best few of each deal type, so one shape (2-for-2 has the most combinations)
@@ -1195,8 +1200,11 @@ export const IDEA_KINDS = { 'win-win': 'Win-win', fair: 'Fair on paper', ask: 'W
 function rateIdea(myGain, theirGain, giveV, getV) {
   if (myGain < 8) return null;
   if (theirGain >= 0 && giveV >= getV * 0.9) return { kind: 'win-win', score: myGain + 0.6 * Math.min(theirGain, myGain) };
-  if (giveV >= getV * 0.95 && theirGain >= -0.6 * myGain) return { kind: 'fair', score: myGain + 1.2 * theirGain };
-  if (giveV >= getV * 0.88 && theirGain >= -1.0 * myGain) return { kind: 'ask', score: myGain + 1.5 * theirGain };
+  // What it costs them counts hard against a deal; what it gives them only nudges it up
+  // (capped at your own gain), so a deal never ranks high just for being great for them.
+  const nudge = 0.3 * Math.min(Math.max(0, theirGain), myGain);
+  if (giveV >= getV * 0.95 && theirGain >= -0.6 * myGain) return { kind: 'fair', score: myGain + 1.2 * Math.min(0, theirGain) + nudge };
+  if (giveV >= getV * 0.88 && theirGain >= -1.0 * myGain) return { kind: 'ask', score: myGain + 1.5 * Math.min(0, theirGain) + nudge };
   return null;
 }
 // Rate a scored deal (from dealEvaluator) the way trade ideas are: null if it doesn't qualify.
@@ -1262,7 +1270,9 @@ export function finderCandidates(m, my, basis, mode, arg, locked = new Set()) {
   const pairs = list => list.flatMap((a, i) => list.slice(i + 1).map(b => [a, b]));
   const mk = ps => ps.reduce((a, p) => a + mv(p), 0);
   // Loose trade-value band; the exact pass (with free-agent fill-ins) decides.
-  const near = (give, get) => { const r = mk(give) / Math.max(1, mk(get)); return r >= 0.75 && r <= 1.6; };
+  // With focus matchups you can overpay much more (see tradeIdeasWith).
+  const top = focusPeriods(m, my.id) ? 2.6 : 1.6;
+  const near = (give, get) => { const r = mk(give) / Math.max(1, mk(get)); return r >= 0.75 && r <= top; };
   const out = [];
   const add = (give, get, partner) => { if (near(give, get)) out.push({ give, get, partner }); };
   const gives = [...mine.map(p => [p]), ...pairs(mine.slice(0, 10))];

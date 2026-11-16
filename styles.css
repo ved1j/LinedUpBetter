@@ -605,3 +605,7 @@ tr.focus td { background: var(--volt-soft); }
 .fopen { display: grid; gap: 4px; font-size: 12.5px; margin-bottom: 6px; }
 .fp-hint { margin: 0 0 12px; }
 #focusplan { scroll-margin-top: 52px; }
+
+/* Rows that don't count (focus mode) */
+tr.ignored td { color: var(--muted); }
+tr.ignored td .small { font-size: 11px; }
