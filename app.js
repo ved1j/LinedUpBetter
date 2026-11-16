@@ -78,7 +78,7 @@ function toast(text) {
 // Memoize expensive season-long calculations until the data, projection basis or
 // viewed team changes.
 function memo(name, fn) {
-  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${playoffsOn()}:${state.pv || 0}`;
+  const key = `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${playoffsOn()}:${focusList().join('.')}:${state.pv || 0}`;
   const hit = state.calc[name];
   if (hit?.key === key) return hit.v;
   const v = fn();
@@ -263,13 +263,31 @@ async function load(force = false) {
 }
 const adjustOn = () => state.settings.adjust !== false;
 const playoffsOn = () => state.settings.playoffs !== false;
+// Focus matchups: the weeks you've chosen to play for, saved per league and team.
+const focusKey = () => `${leagueKey()}:${state.viewId}`;
+const focusList = () => (state.settings.focus?.[focusKey()] || []).map(Number);
+// The focus weeks still to play for the team you're viewing, or null.
+const focusLeft = () => (state.model && state.an ? A.focusPeriods(state.model, state.an.my.id) : null);
+const poss = name => (/s$/i.test(name) ? `${name}’` : `${name}’s`);
+const wkName = id => (id > state.model.regularPeriods ? `Playoffs Rd ${A.playoffPeriods(state.model).indexOf(id) + 1}` : `Wk ${id}`);
+// Who the team you're viewing plays in a week (null for a bye or an undrawn playoff round).
+function oppIn(id) {
+  const m = state.model, me = state.an.my.id;
+  const g = m.matchups.find(x => x.period === id && x.home && x.away && (x.home.teamId === me || x.away.teamId === me));
+  return g ? m.teams.find(t => t.id === (g.home.teamId === me ? g.away.teamId : g.home.teamId)) : null;
+}
 // What season-long numbers cover, for labels.
-const horizon = () => (playoffsOn() ? 'rest of the season + playoffs' : 'rest of the regular season');
+const horizon = () => {
+  const f = focusLeft();
+  if (f) return `focus matchups only (${f.map(wkName).join(', ')})`;
+  return playoffsOn() ? 'rest of the season + playoffs' : 'rest of the regular season';
+};
 function reanalyze() {
   const m = state.model;
   if (!m) { state.an = null; return; }
   m.myTeamId = state.viewId;
   A.setAdjustments({ usage: adjustOn(), rest: adjustOn(), playoffs: playoffsOn() });
+  A.setFocus(state.viewId, focusList());
   // Players you've X'd out never show up in waiver suggestions, streaming plans or stash
   // lists (but still count as teammates for usage and as trade fill-ins).
   m.banned = bannedSet();
@@ -279,6 +297,14 @@ function reanalyze() {
   for (const p of m.freeAgents) if (!state.index.has(p.id)) state.index.set(p.id, { p, ownerId: null });
 }
 async function saveSettings() { await store.set('settings', state.settings); }
+async function setFocusList(list, msg = '') {
+  const m = state.model;
+  const clean = [...new Set(list.map(Number))].filter(id => id >= m.currentPeriod).sort((a, b) => a - b);
+  state.settings.focus ||= {};
+  if (clean.length) state.settings.focus[focusKey()] = clean; else delete state.settings.focus[focusKey()];
+  await saveSettings(); reanalyze(); state.keepScroll = true; render();
+  toast(msg || (clean.length ? `Focusing on ${clean.map(wkName).join(', ')}` : 'Focus off: every week counts again'));
+}
 
 // ---------- views
 function vHeader() {
@@ -559,8 +585,8 @@ function vWaivers() {
         ${th('avg', 'Avg', 'Actual season average (matches ESPN)')}
         ${th('v', 'Proj/G', 'Projected FP per game: ' + A.BASIS[state.settings.basis])}
         ${th('gl', 'GL', 'Games left this week')}
-        ${th('week', 'Wk +FP', 'Projected points gained this week if you swap in for your drop candidate (accounts for open lineup slots)')}
-        ${th('ros', 'ROS +', 'Projected points gained over the ' + horizon() + ' (bye weeks don\'t count) if swapped in for your drop candidate')}
+        ${th('week', 'Wk +FP', an.skip ? 'This week isn’t one of your focus matchups, so nothing counts' : 'Projected points gained this week if you swap in for your drop candidate (accounts for open lineup slots)')}
+        ${th('ros', focusLeft() ? 'Focus +' : 'ROS +', 'Projected points gained over the ' + horizon() + ' (bye weeks don\'t count) if swapped in for your drop candidate')}
         ${th('next', 'Next G', 'Games next matchup')}
         ${th('trend', 'Δ L15', 'Last 15 days avg minus season avg')}
         ${th('po', 'PO G', playoffsOn() ? 'Games during fantasy playoffs that count for you (a likely first-round bye counts for little)' : 'Fantasy playoffs are switched off in Settings')}
@@ -877,7 +903,8 @@ function vPlanCard() {
   const plan = an.plan || [];
   const left = A.addsLeft(m, an.my);
   const head = `<h3>Streaming plan <span class="r muted small">${m.acqLimit > 0 ? `${left} add${left === 1 ? '' : 's'} left this matchup` : 'no add limit, showing up to 3 moves'}</span></h3>`;
-  if (!plan.length) return `<section class="card">${head}<p class="muted">No add/drop beats your current roster for the rest of this matchup.</p></section>`;
+  const why = an.off || an.skip;
+  if (!plan.length) return `<section class="card">${head}<p class="muted">${why ? `${esc(why.title)}: this week counts for nothing, so no streams.` : 'No add/drop beats your current roster for the rest of this matchup.'}</p></section>`;
   const total = plan.reduce((a, x) => a + x.gain, 0);
   return `<section class="card">${head}
     <ol class="plan">${plan.map((x, i) => `<li><span class="rk">${i + 1}</span>
@@ -899,7 +926,13 @@ function vPlayoffs() {
   // How much each round counts for you: 0 for a bye (or when playoffs are switched off),
   // your chance of not getting a first-round bye before the bracket is set.
   const wts = po.map(id => A.periodWeight(m, an.my.id, id, state.settings.basis));
-  const wNote = i => (playoffsOn() && wts[i] <= 0.95 ? `<br><span class="small down" title="${wts[i] === 0 ? 'No matchup for you this round, so it doesn’t count' : `About ${Math.round((1 - wts[i]) * 100)}% chance of a first-round bye: counts ${Math.round(wts[i] * 100)}%`}">${wts[i] === 0 ? 'bye · doesn’t count' : `counts ${Math.round(wts[i] * 100)}%`}</span>` : '');
+  const realW = po.map(id => A.periodWeight(m, an.my.id, id, state.settings.basis, false));
+  const wNote = i => {
+    if (!playoffsOn() || wts[i] > 0.95) return '';
+    const nf = wts[i] === 0 && realW[i] > 0;
+    const tip = nf ? 'Not one of your focus matchups, so it doesn’t count' : wts[i] === 0 ? 'No matchup for you this round, so it doesn’t count' : `About ${Math.round((1 - wts[i]) * 100)}% chance of a first-round bye: counts ${Math.round(wts[i] * 100)}%`;
+    return `<br><span class="small down" title="${tip}">${nf ? 'not a focus week' : wts[i] === 0 ? 'bye · doesn’t count' : `counts ${Math.round(wts[i] * 100)}%`}</span>`;
+  };
   const mine = an.my.roster.map(p => {
     const per = po.map(id => A.gamesIn(m, p, m.periods[id]));
     return { p, per, tot: A.gamesIn(m, p, all), cnt: per.reduce((a, n, i) => a + n * wts[i], 0) };
@@ -925,8 +958,8 @@ function vPlayoffs() {
       <section class="card"><h3>NBA games by playoff round</h3>
         <div class="scrollx"><table><thead><tr><th>Team</th>${head}<th class="num">Tot</th><th>Roster</th></tr></thead><tbody>${nbaRows}</tbody></table></div></section>
       <section class="card"><h3>Playoff stash targets <span class="r muted small">Proj/G × playoff games</span></h3>
-        ${stash.map(w => `<div class="pick">${pCell(w.p)}<div class="num small muted">${f1(w.v)} proj/G<br>${w.poGames} PO games</div><div class="gain">${f0(w.poPts)}</div>${xBtn(w.p.id)}</div>`).join('')}
-        <p class="muted small">Grab these a couple of weeks before the trade deadline / playoffs while they're cheap.</p></section>
+        ${focusLeft() && !focusLeft().some(id => id > m.regularPeriods) ? '<p class="muted">None of your focus matchups are in the playoffs, so playoff stashes count for nothing right now.</p>' : `${stash.map(w => `<div class="pick">${pCell(w.p)}<div class="num small muted">${f1(w.v)} proj/G<br>${w.poGames} PO games</div><div class="gain">${f0(w.poPts)}</div>${xBtn(w.p.id)}</div>`).join('')}
+        <p class="muted small">Grab these a couple of weeks before the trade deadline / playoffs while they're cheap.</p>`}</section>
     </div>`;
 }
 
@@ -997,7 +1030,7 @@ function getOdds() {
 }
 
 // ---- Trade tab
-const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${playoffsOn()}:${state.pv || 0}`;
+const scanKey = () => `${state.model.fetchedAt || 'demo'}:${state.settings.basis}:${state.viewId}:${adjustOn()}:${playoffsOn()}:${focusList().join('.')}:${state.pv || 0}`;
 // Yield to the browser between chunks of work. MessageChannel isn't throttled in
 // background tabs the way setTimeout is, so long scans keep moving in a full-tab view.
 const yieldChannel = new MessageChannel();
@@ -1314,13 +1347,32 @@ function vTrade() {
     const mGet = get.reduce((s2, p) => s2 + mv(p), 0) + a.adds.reduce((s2, p) => s2 + mv(p), 0);
     const ratio = mGet ? mGive / mGet : 1;
     const odds = ratio >= 0.97 ? ['likely', 'up', 'they get as much name value as they give'] : ratio >= 0.88 ? ['possible', 'muted', 'close on name value, expect a counter'] : ['unlikely', 'down', 'they give up a bigger name than they get'];
+    // Focus matchups: win chance in each before and after (the partner's roster changes
+    // too, which matters when you play them in one of those weeks).
+    let focusBlock = '', fWins = null;
+    if (focusLeft()) {
+      const rosters = { [an.my.id]: a.roster, ...(z ? { [partner.id]: z.roster } : {}) };
+      const was = A.focusOdds(m, an.my.id, b), now = A.focusOdds(m, an.my.id, b, rosters);
+      const wp = x => (x.opp ? pct(x.winProb) : '–');
+      const cls = (x, y) => (!y.opp ? '' : y.winProb - x.winProb > 0.005 ? 'up' : y.winProb - x.winProb < -0.005 ? 'down' : 'muted');
+      const proj = x => `${f0(x.myProj)}${x.opp ? '–' + f0(x.oppProj) : ''}`;
+      const trs = was.map((x, i) => `<tr><td>${wkName(x.period)}${x.opp ? ` vs ${esc(x.opp.name)}${partner && x.opp.id === partner.id ? ' <span class="small muted">(trade partner)</span>' : ''}` : ''}</td>
+          <td class="num">${proj(x)}</td><td class="num">${proj(now[i])}</td><td class="num">${wp(x)}</td><td class="num"><b class="${cls(x, now[i])}">${wp(now[i])}</b></td></tr>`).join('');
+      const vs = was.filter(x => x.opp);
+      if (vs.length) fWins = now.reduce((s2, x) => s2 + (x.winProb ?? 0), 0) - vs.reduce((s2, x) => s2 + x.winProb, 0);
+      focusBlock = `<div class="rk-label" style="margin-top:14px">Your focus matchups</div>
+        <div class="scrollx"><table class="impact"><thead><tr><th>Matchup</th><th class="num">Proj now</th><th class="num">After</th><th class="num">Win % now</th><th class="num">After</th></tr></thead><tbody>${trs}
+        ${vs.length ? `<tr class="sum"><td>Expected wins</td><td></td><td></td><td class="num">${vs.reduce((s2, x) => s2 + x.winProb, 0).toFixed(2)}</td><td class="num">${now.reduce((s2, x) => s2 + (x.winProb ?? 0), 0).toFixed(2)}</td></tr>` : ''}</tbody></table></div>`;
+    }
+    const good = fWins != null && Math.abs(fWins) >= 0.005 ? fWins > 0 : verdict > 0;
     result = `<table class="impact"><thead><tr><th>Projected points</th><th class="num">${esc(an.my.name)}</th>${z ? `<th class="num">${esc(partner.name)}</th>` : ''}</tr></thead><tbody>
         ${row('This matchup', 'week')}${row('Rest of regular season', 'ros')}${playoffsOn() ? row('Fantasy playoffs', 'po') : `<tr><td>Fantasy playoffs</td><td class="num muted" colspan="${z ? 2 : 1}">not counted</td></tr>`}
         <tr class="sum"><td>Proj/G swapped</td><td class="num">${d(vGive, vGet)}</td>${z ? `<td class="num">${d(vGet, vGive)}</td>` : ''}</tr>
         <tr class="sum"><td title="Name + form: draft position, last season, ESPN projection and this season (free-agent fill-ins included)">Trade value swapped</td><td class="num">${d(mGive, mGet)}</td>${z ? `<td class="num">${d(mGet, mGive)}</td>` : ''}</tr>
       </tbody></table>
+      ${focusBlock}
       ${z ? `<p class="small" style="margin:10px 0 0">Acceptance: <b class="${odds[1]}">${odds[0]}</b> <span class="muted">— ${odds[2]} (trade value ${f1(mGive)} for ${f1(mGet)}).</span></p>` : ''}
-      <p class="verdict ${verdict > 0 ? 'up' : 'down'}">${verdict > 0 ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${signed(verdict)} projected points, ${horizon()}.</p><p class="muted small" style="margin-top:4px">Bye weeks count for nothing on either side${playoffsOn() ? ' (a likely first-round playoff bye counts for little)' : ''}.
+      <p class="verdict ${good ? 'up' : 'down'}">${good ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${fWins != null ? `${signed(fWins, 2)} expected wins in your focus matchups (${signed(verdict)} projected points in them)` : `${signed(verdict)} projected points, ${horizon()}`}.</p><p class="muted small" style="margin-top:4px">${focusLeft() ? `Your column counts only your focus matchups${z ? `; ${esc(poss(partner.name))} covers the ${playoffsOn() ? 'rest of their season + playoffs' : 'rest of their regular season'}` : ''}.` : `Bye weeks count for nothing on either side${playoffsOn() ? ' (a likely first-round playoff bye counts for little)' : ''}.`}
         ${z ? `<span class="muted">${esc(partner.name)}: ${signed(theirs2)}${verdict > 0 && theirs2 > 0 ? ' — good for both, easy sell.' : verdict > 0 && vGive >= vGet * 0.97 ? ' — looks fair to them on paper.' : ''}</span>` : ''}</p>
       ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}. A team left a player short fills the spot with the best free agent for its lineup.</p>` : ''}
       ${faNote.length ? `<p class="muted small">${faNote.join('; ')}. That part isn't counted above, since it doesn't need the trade.</p>` : ''}`;
@@ -1390,13 +1442,17 @@ function vMatchups() {
   // Same games, each counted for whoever's favored (what the Win % column suggests).
   const favW = an.my.wins + future.filter(x => x.opp && x.winProb >= 0.5).length;
   const favL = an.my.losses + future.filter(x => x.opp && x.winProb < 0.5).length;
+  const fOn = new Set(focusLeft() || []);
   const rows = sched.map(x => {
     const cur = x.period === m.currentPeriod;
     const po = x.period > m.regularPeriods;
+    const can = !x.done && x.period >= m.currentPeriod && x.opp;
+    const star = can ? `<button class="star ${fOn.has(x.period) ? 'on' : ''}" data-act="focus" data-p="${x.period}" title="${fOn.has(x.period) ? 'Remove from' : 'Add to'} your focus matchups" aria-label="${fOn.has(x.period) ? 'Remove' : 'Add'} week ${x.period} ${fOn.has(x.period) ? 'from' : 'to'} focus matchups">${fOn.has(x.period) ? '★' : '☆'}</button>` : '';
     const res = x.done
       ? `<span class="res ${x.won ? 'w' : x.tie ? '' : 'l'}">${x.won ? 'W' : x.tie ? 'T' : 'L'}</span> ${f0(x.myPts)}–${f0(x.oppPts)}`
       : `${f0(x.myProj)}–${f0(x.oppProj)}`;
-    return `<tr class="${cur ? 'me' : ''} ${x.done ? 'done' : ''}">
+    return `<tr class="${cur ? 'me' : ''} ${x.done ? 'done' : ''} ${fOn.has(x.period) ? 'focus' : ''}">
+      <td class="starcell">${star}</td>
       <td class="muted">${po ? 'PO ' : 'Wk '}${x.period}<br><span class="small">${A.periodRange(m, x.period)}</span></td>
       <td>${x.opp ? `<button class="tlink" data-view="${x.opp.id}">${esc(x.opp.name)}</button><br><span class="small muted">${x.opp.wins}-${x.opp.losses}</span>` : '<span class="muted">Bye</span>'}</td>
       <td class="num">${res}${cur ? '<br><span class="small muted">live + proj</span>' : ''}</td>
@@ -1408,9 +1464,60 @@ function vMatchups() {
       <div class="board-list">${live || '<p class="muted">No matchups this week.</p>'}</div></section>
     ${vMatter()}
     ${vBreakdown()}
+    ${vFocus(sched)}
     <section class="card"><h3>${esc(an.my.name)} · schedule & predictions <span class="r muted small"><span title="Expected record: your wins so far plus the win chances of the games left added up (a 90% game counts 0.9 wins), so a few upsets are built in">projected record <b>${Math.round(projW)}-${Math.round(projL)}</b></span> · <span title="Every game left counted for whoever's favored (Win % of 50 or more): the best-case read of the Win % column">${favW}-${favL} if every favorite wins</span></span></h3>
-      <div class="scrollx"><table><thead><tr><th>Week</th><th>Opponent</th><th class="num">Score / Proj</th><th class="num">Win %</th></tr></thead><tbody>${rows || '<tr><td colspan="4" class="muted">No schedule yet.</td></tr>'}</tbody></table></div>
+      <div class="scrollx"><table><thead><tr><th class="starcell" title="Focus: star the matchups you care about">★</th><th>Week</th><th>Opponent</th><th class="num">Score / Proj</th><th class="num">Win %</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="muted">No schedule yet.</td></tr>'}</tbody></table></div>
       <p class="muted small">Future weeks are projected with each team's current roster and NBA schedule, using ${esc(A.BASIS[state.settings.basis])} values and this league's scoring. A team with an open roster spot is assumed to pick up the best free agent once adds reset next week. Projected record adds up the win chances (a 90% game counts 0.9 wins), so it builds in a few upsets; "if every favorite wins" counts each game for the favorite.</p></section>`;
+}
+
+// Focus matchups: pick the games you care about (by week, by opponent, or a quick pick).
+function vFocus(sched) {
+  const { an, model: m } = state;
+  const on = new Set(focusList());
+  const left = focusLeft();
+  const games = sched.filter(x => !x.done && x.opp && x.period >= m.currentPeriod);
+  const reg = games.filter(x => x.period <= m.regularPeriods);
+  // Opponents, worst record first, with the weeks you still play them.
+  const opps = new Map();
+  for (const x of reg) {
+    const o = opps.get(x.opp.id) || { t: x.opp, ps: [] };
+    o.ps.push(x.period);
+    opps.set(x.opp.id, o);
+  }
+  const winPct = t => (t.wins + 0.5 * (t.ties || 0)) / Math.max(1, t.wins + t.losses + (t.ties || 0));
+  const oppChips = [...opps.values()].sort((a, b) => winPct(a.t) - winPct(b.t) || a.t.name.localeCompare(b.t.name)).map(o => {
+    const all = o.ps.every(p => on.has(p));
+    return `<button class="chip fchip ${all ? 'on' : ''}" data-act="focus-opp" data-ps="${o.ps.join(',')}" title="${all ? 'Stop focusing on' : 'Focus on'} every game left against ${esc(o.t.name)}">${esc(o.t.name)}<span>${o.t.wins}-${o.t.losses} · ${o.ps.map(wkName).join(', ')}</span></button>`;
+  }).join('');
+  const best = reg.slice().sort((a, b) => b.winProb - a.winProb).slice(0, 3).map(x => x.period).sort((a, b) => a - b);
+  const toss = reg.filter(x => x.winProb >= 0.35 && x.winProb <= 0.65).map(x => x.period);
+  const rounds = playoffsOn() ? A.playoffPeriods(m).filter(id => id >= m.currentPeriod) : [];
+  const quick = [
+    best.length ? `<button class="chip fchip" data-act="focus-set" data-ps="${best.join(',')}" title="The ${best.length} games left with your highest win chance: ${best.map(wkName).join(', ')}">Your ${best.length} best shots<span>${best.map(wkName).join(', ')}</span></button>` : '',
+    toss.length ? `<button class="chip fchip" data-act="focus-set" data-ps="${toss.join(',')}" title="Games left you win 35–65% of the time: where points swing results most">Toss-ups<span>${toss.length} game${toss.length > 1 ? 's' : ''} at 35–65%</span></button>` : '',
+    rounds.length ? `<button class="chip fchip" data-act="focus-set" data-ps="${rounds.join(',')}" title="Only the fantasy playoffs count: for a team that's in, or as good as in">Playoffs only<span>${rounds.length} round${rounds.length > 1 ? 's' : ''}</span></button>` : '',
+    ...rounds.map((id, i) => `<button class="chip fchip ${on.has(id) ? 'on' : ''}" data-act="focus" data-p="${id}" title="${on.has(id) ? 'Remove' : 'Add'} playoff round ${i + 1}">Playoffs Rd ${i + 1}<span>${A.periodRange(m, id)}</span></button>`),
+  ].filter(Boolean).join('');
+  let top;
+  if (left) {
+    const odds = A.focusOdds(m, an.my.id, state.settings.basis);
+    const vs = odds.filter(x => x.opp);
+    const expW = vs.reduce((a, x) => a + x.winProb, 0);
+    const trs = odds.map(x => `<tr><td>${wkName(x.period)}<br><span class="small muted">${A.periodRange(m, x.period)}</span></td>
+        <td>${x.opp ? `<button class="tlink" data-view="${x.opp.id}">${esc(x.opp.name)}</button><br><span class="small muted">${x.opp.wins}-${x.opp.losses}</span>` : '<span class="muted">opponent not set yet</span>'}</td>
+        <td class="num">${f0(x.myProj)}${x.opp ? '–' + f0(x.oppProj) : ''}</td>
+        <td class="num">${x.opp ? `<b class="${x.winProb >= 0.5 ? 'up' : 'down'}">${pct(x.winProb)}</b>` : '–'}</td>
+        <td class="num"><button class="link" data-act="focus" data-p="${x.period}">Remove</button></td></tr>`).join('');
+    top = `<p class="callout">Playing for <b>${odds.length} matchup${odds.length > 1 ? 's' : ''}</b>${vs.length ? `: about <b>${f1(expW)} wins</b> expected out of ${vs.length}` : ''}. Trades, trade ideas, waiver pickups (ROS +), player worth and the Slate now count only these weeks. Every other week counts for nothing, like a bye.</p>
+      <div class="scrollx"><table><thead><tr><th>Week</th><th>Opponent</th><th class="num">Proj</th><th class="num">Win %</th><th></th></tr></thead><tbody>${trs}</tbody></table></div>`;
+  } else {
+    top = `<p class="small" style="margin:0 0 12px">Only care about a few games, like the ones against the other weak teams? Pick them here or star weeks in the schedule below. Trades, trade ideas, waiver pickups, player worth and the Slate will then count only those weeks, and every other week counts for nothing, like a bye.${on.size ? ' <span class="muted">Your earlier picks are all played, so every week counts again.</span>' : ''}</p>`;
+  }
+  return `<section class="card" id="focus"><h3>Focus matchups <span class="r muted small">${left ? `<button class="link" data-act="focus-clear">Turn off</button>` : 'play for the games you care about'}</span></h3>
+    ${top}
+    ${oppChips ? `<div class="rk-label">Every game left against</div><div class="chips">${oppChips}</div>` : ''}
+    ${quick ? `<div class="rk-label">Quick picks</div><div class="chips">${quick}</div>` : ''}
+  </section>`;
 }
 
 // Where a projection comes from: every player's projected starts and points for a week.
@@ -1473,7 +1580,7 @@ function vMatter() {
       <div class="mt-swing"><b>${signed(x.swing * 100)}%</b><span class="small muted">playoff odds: ${Math.round(x.ifWin * 100)}% if you win, ${Math.round(x.ifLoss * 100)}% if you lose</span></div>
       <div class="mt-stream">${x.stream ? `<span class="small muted">stream</span> ${pCell(x.stream.fa)}<span class="small"><span class="up">${signed(x.stream.gain)}</span> · ${x.stream.games} g · for ${esc(x.stream.drop.name)}</span>` : '<span class="muted small">no stream beats your roster</span>'}</div>
     </div>`).join('');
-  return `<section class="card"><h3>Matchups that matter <span class="r muted small">your remaining matchups that swing your playoff odds most</span></h3>${rows}
+  return `<section class="card"><h3>Matchups that matter <span class="r muted small">your remaining matchups that swing your playoff odds most · <button class="link" data-act="focus-set" data-ps="${list.map(x => x.period).join(',')}" title="Make these your focus matchups">Focus on these</button></span></h3>${rows}
     <p class="muted small">From 3,000 simulated seasons: how often you make the playoffs after winning vs losing each matchup. Stream = the free agent who'd add the most that week, and who they'd replace.</p></section>`;
 }
 
@@ -1488,7 +1595,7 @@ function vSlate() {
   const s = memo(`slate:${period}`, () => A.weeklySlate(m, an.my, period, state.settings.basis, myFAs()));
   const nav = `<span class="wknav">
       <button class="arrow" data-act="slwk" data-p="${prev ?? ''}" ${prev == null ? 'disabled' : ''} aria-label="Previous slate week">‹</button>
-      <span>Week ${period}</span>
+      <span>Week ${period}${focusLeft()?.includes(period) ? ' <span class="star on" title="One of your focus matchups">★</span>' : ''}</span>
       <button class="arrow" data-act="slwk" data-p="${next ?? ''}" ${next == null ? 'disabled' : ''} aria-label="Next slate week">›</button></span>`;
   const maxNba = 15;
   const days = s.perDay.map(d => {
@@ -1689,7 +1796,7 @@ function vSettings() {
         <span><b>Adjust for teammate injuries and back-to-back rest</b><br><span class="muted small">When a regular is out, teammates absorb part of their production (and lose it when a starter returns from a long absence). Stars get −5% on the second night of back-to-backs. Turn off for raw averages × games.</span></span></label>
       <label class="toggle"><input type="checkbox" data-act="playoffs" ${playoffsOn() ? 'checked' : ''}>
         <span><b>Count the fantasy playoffs</b><br><span class="muted small">On: everything season-long (trades, the finder, waiver ROS gains, player worth, rankings, injury discounts, needs) covers the rest of the regular season plus the playoff rounds. Off: regular season only, and playoff weeks count for nothing anywhere.</span></span></label>
-      <p class="muted small" style="margin:10px 0 0">Bye weeks never count: a week you have no matchup (a regular-season bye, a first-round playoff bye, or rounds after you're out) is ignored everywhere, so a player's games that week add nothing. Before the bracket is set, round 1 counts at your chance of <i>not</i> getting a bye, from the playoff-odds simulation.</p>
+      <p class="muted small" style="margin:10px 0 0">Bye weeks never count: a week you have no matchup (a regular-season bye, a first-round playoff bye, or rounds after you're out) is ignored everywhere, so a player's games that week add nothing. Before the bracket is set, round 1 counts at your chance of <i>not</i> getting a bye, from the playoff-odds simulation. Focus matchups (Matchups tab) work the same way: pick the games you care about and every other week counts for nothing.</p>
     </section>
     <details class="card adv"><summary><h3>Advanced: manual ESPN login <span class="r">only if your league still won't load</span></h3></summary>
       <div class="form">
@@ -1722,11 +1829,21 @@ function vBody() {
   return { overview: vOverview, roster: vRoster, matchups: vMatchups, slate: vSlate, waivers: vWaivers, players: vPlayers, trade: vTrade, injuries: vInjuries, playoffs: vPlayoffs, watchlist: vWatchlist, league: vLeague, fun: vFun }[state.tab]();
 }
 
+// Shown on tabs whose numbers follow your focus matchups, so it's never a surprise.
+function vFocusBar() {
+  const f = focusLeft();
+  if (!f || !['overview', 'roster', 'slate', 'waivers', 'trade', 'injuries', 'playoffs'].includes(state.tab)) return '';
+  const names = f.map(id => { const o = oppIn(id); return `${wkName(id)}${o ? ' vs ' + esc(o.name) : ''}`; });
+  return `<div class="focusbar"><span class="fb-tag">Focus</span>
+    <span>Only <b>${names.join(', ')}</b> count${f.length === 1 ? 's' : ''} for trades, waivers and player worth. Every other week counts for nothing.</span>
+    <span class="fb-act"><button class="link" data-act="focus-edit">Edit</button> · <button class="link" data-act="focus-clear">Turn off</button></span></div>`;
+}
+
 function render() {
   const app = document.getElementById('app');
   const scroll = document.querySelector('main')?.scrollTop || 0;
   let body;
-  try { body = vBody(); } catch (e) { console.error(e); body = `<div class="card err">Something broke rendering this tab: ${esc(e.message)}</div>`; }
+  try { body = (state.model && state.an ? vFocusBar() : '') + vBody(); } catch (e) { console.error(e); body = `<div class="card err">Something broke rendering this tab: ${esc(e.message)}</div>`; }
   let drawer = '';
   try { drawer = state.model && state.openPlayer != null ? vDrawer() : ''; } catch (e) { console.error(e); }
   app.innerHTML = vHeader() + `<main>${body}</main>` + drawer;
@@ -1814,6 +1931,15 @@ document.addEventListener('click', async e => {
     f.limit = 10; state.keepScroll = true; render(); return;
   }
   if (act === 'more-ideas') { state.ideaView.limit += 10; state.keepScroll = true; render(); return; }
+  if (act === 'focus') { const p = +t.dataset.p, on = focusList(); await setFocusList(on.includes(p) ? on.filter(x => x !== p) : [...on, p]); return; }
+  if (act === 'focus-opp') {
+    const ps = t.dataset.ps.split(',').map(Number), on = focusList();
+    await setFocusList(ps.every(p => on.includes(p)) ? on.filter(x => !ps.includes(x)) : [...on, ...ps]);
+    return;
+  }
+  if (act === 'focus-set') { await setFocusList(t.dataset.ps.split(',').map(Number)); return; }
+  if (act === 'focus-clear') { await setFocusList([]); return; }
+  if (act === 'focus-edit') { setTab('matchups'); document.getElementById('focus')?.scrollIntoView({ block: 'start' }); return; }
   if (act === 'recap') {
     navigator.clipboard.writeText(recapText()).then(() => toast('Recap copied: paste it in your group chat'), () => toast('Couldn\'t copy. Try again.'));
     return;

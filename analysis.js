@@ -26,6 +26,21 @@ const dtdFactor = (m, p, sp) => (isDTD(p) && (m.periods[m.currentPeriod] || []).
 // Back-to-back rest: stars (35+ Proj/G) sometimes sit the second night, so -5% there.
 export const adjustments = { usage: true, rest: true, playoffs: true };
 export const setAdjustments = o => Object.assign(adjustments, o);
+
+// ---- Focus matchups
+// The weeks a manager has chosen to play for (say, only the games against the other weak
+// teams). While a team has focus weeks left, only those weeks count for it and every other
+// week counts for nothing, like a bye. It works through dayWeights, so trades, trade ideas,
+// waiver gains, player worth and the Slate all follow it.
+export const focus = { team: null, periods: new Set() };
+export const setFocus = (team, periods) => { focus.team = team; focus.periods = new Set((periods || []).map(Number)); };
+// The focus weeks a team still has to play, in order, or null when it has none.
+export function focusPeriods(m, teamId) {
+  if (focus.team !== teamId || !focus.periods.size) return null;
+  const left = [...focus.periods].filter(id => id >= m.currentPeriod && m.periods[id]
+    && (id <= m.regularPeriods || adjustments.playoffs)).sort((a, b) => a - b);
+  return left.length ? left : null;
+}
 const USAGE_SHARE = 0.6, USAGE_CAP = 0.3, REST_STAR = 35, REST_FACTOR = 0.95;
 const usageMemo = new WeakMap();
 
@@ -577,10 +592,28 @@ function byeChance(m, teamId, basis) {
   if (!byKey.has(k)) byKey.set(k, playoffOdds(m, basis, 2000));
   return byKey.get(k).teams[teamId]?.bye ?? 0;
 }
-export function dayWeights(m, teamId, basis = 'smart') {
+// With focus weeks set for the team (and useFocus on), every other week from now on counts 0.
+const spWeights = (m, period) => {
+  const sp = new Map();
+  for (const [id, w] of period) for (const d of m.periods[id] || []) sp.set(d, w);
+  return sp;
+};
+export function dayWeights(m, teamId, basis = 'smart', useFocus = true) {
   let byKey = weightMemo.get(m);
   if (!byKey) weightMemo.set(m, byKey = new Map());
   const k = `${teamId}:${basis}:${adjustments.playoffs}:${adjustments.usage}:${adjustments.rest}`;
+  const fp = useFocus ? focusPeriods(m, teamId) : null;
+  if (fp) {
+    const fk = `${k}:focus:${fp.join(',')}`;
+    if (byKey.has(fk)) return byKey.get(fk);
+    const keep = new Set(fp);
+    const period = new Map(dayWeights(m, teamId, basis, false).period);
+    const last = Math.max(...Object.keys(m.periods).map(Number));
+    for (let id = m.currentPeriod; id <= last; id++) if (!keep.has(id)) period.set(id, 0);
+    const out = { period, sp: spWeights(m, period) };
+    byKey.set(fk, out);
+    return out;
+  }
   if (byKey.has(k)) return byKey.get(k);
   const period = new Map();
   for (let id = m.currentPeriod; id <= m.regularPeriods; id++) {
@@ -605,15 +638,18 @@ export function dayWeights(m, teamId, basis = 'smart') {
       if (w !== 1) period.set(id, w);
     });
   }
-  const sp = new Map();
-  for (const [id, w] of period) for (const d of m.periods[id] || []) sp.set(d, w);
-  const out = { period, sp };
+  const out = { period, sp: spWeights(m, period) };
   byKey.set(k, out);
   return out;
 }
-export const periodWeight = (m, teamId, id, basis) => dayWeights(m, teamId, basis).period.get(id) ?? 1;
-// Why a week doesn't count for a team (for notes and the Slate).
-export function offReason(m, id) {
+export const periodWeight = (m, teamId, id, basis, useFocus = true) => dayWeights(m, teamId, basis, useFocus).period.get(id) ?? 1;
+// Why a week doesn't count for a team (for notes and the Slate). With a team, a week that
+// only drops out because of its focus matchups says so.
+export function offReason(m, id, teamId = null, basis = 'smart') {
+  const fp = teamId != null ? focusPeriods(m, teamId) : null;
+  if (fp && !fp.includes(id) && periodWeight(m, teamId, id, basis, false) > 0) {
+    return { title: 'Not a focus matchup', detail: 'You’re only playing for your focus matchups, so this week counts for nothing: no streams needed. Setting your lineup is still free.', focus: true };
+  }
   if (id > m.regularPeriods && !adjustments.playoffs) return { title: 'Playoffs not counted', detail: 'Fantasy playoffs are switched off in Settings, so this week doesn’t count anywhere.' };
   if (id > m.regularPeriods) return { title: 'No playoff matchup', detail: 'A first-round bye or out of the bracket, so nothing this round counts: no lineup moves or streams needed.' };
   return { title: 'Bye week', detail: 'No opponent this week, so nothing counts: no lineup moves or streams needed.' };
@@ -735,7 +771,7 @@ export function tradeImpact(m, team, give, get, basis, mine = true) {
     const alone = calc(applyTrade(before, [], adds, basis).after);
     fa = { week: Math.max(0, alone.week - b.week), ros: Math.max(0, alone.ros - b.ros), po: Math.max(0, alone.po - b.po) };
   }
-  return { before: b, after: calc(after), drops, adds, fa };
+  return { before: b, after: calc(after), drops, adds, fa, roster: after };
 }
 
 // League-wide form: rostered players on other teams playing below their norm (buy low),
@@ -790,6 +826,25 @@ export function scoreboard(m, period, basis) {
   });
 }
 
+// A team's focus matchups, projected: win chance against each opponent, or just its own
+// projected points for a playoff round with no opponent yet. `rosters` (team id → roster)
+// swaps in rosters, say after a trade, for either side. Scores already in count.
+export function focusOdds(m, teamId, basis, rosters = {}) {
+  const fp = focusPeriods(m, teamId);
+  if (!fp) return [];
+  const team = id => { const t = m.teams.find(x => x.id === id); return t && rosters[id] ? { ...t, roster: rosters[id] } : t; };
+  const me = team(teamId);
+  return fp.map(id => {
+    const g = m.matchups.find(x => x.period === id && hasTeam(x, teamId) && realGame(x));
+    if (!g) return { period: id, opp: null, myProj: projectDays(m, me.roster, daysLeft(m, id), basis).total, winProb: null };
+    const home = g.home.teamId === teamId;
+    const mine = home ? g.home : g.away, theirs = home ? g.away : g.home;
+    const opp = team(theirs.teamId);
+    const pr = projectMatchup(m, id, me, opp, basis, mine.pts || 0, theirs.pts || 0);
+    return { period: id, opp, myProj: pr.homeProj, oppProj: pr.awayProj, winProb: pr.winProb };
+  });
+}
+
 // One team's full schedule from its point of view: results, live week, projections.
 export function teamSchedule(m, teamId, basis) {
   const team = id => m.teams.find(t => t.id === id);
@@ -818,7 +873,11 @@ export function analyze(m, basis = 'smart') {
   // A week that doesn't count for you (bye, out of the playoffs, playoffs switched off):
   // no lineup advice, streaming or this-week gains.
   const tw = dayWeights(m, my.id, basis);
-  const off = (tw.period.get(m.currentPeriod) ?? 1) === 0 ? offReason(m, m.currentPeriod) : null;
+  const off = periodWeight(m, my.id, m.currentPeriod, basis, false) === 0 ? offReason(m, m.currentPeriod) : null;
+  // Not one of your focus matchups: lineup advice stays (it's free), but streams and
+  // this-week gains go, since the week doesn't count.
+  const skip = !off && (tw.period.get(m.currentPeriod) ?? 1) === 0 ? offReason(m, m.currentPeriod, my.id, basis) : null;
+  const quiet = off || skip;
 
   // ---- Matchup
   let matchup = null;
@@ -850,7 +909,7 @@ export function analyze(m, basis = 'smart') {
     const gl = gamesIn(m, p, rem);
     let score = v * (1 + 0.06 * (gl - 3));
     if (isOut(p) && (p.outForSeason || !p.returnSP)) score *= 0.4; else if (isDTD(p)) score *= 0.9;
-    const weekGain = drop && !off ? projectDays(m, [...without, p], rem, basis).total - base.total : 0;
+    const weekGain = drop && !quiet ? projectDays(m, [...without, p], rem, basis).total - base.total : 0;
     const s = p.stats;
     return {
       p, v, gl, score, weekGain,
@@ -877,8 +936,15 @@ export function analyze(m, basis = 'smart') {
     const diff = matchup.myProj - matchup.oppProj;
     const wp = Math.min(99, Math.max(1, Math.round(matchup.winProb * 100)));
     if (diff >= 0) note('good', 'Matchup', `On pace to win by ${Math.round(diff)}`, `${wp}% win chance. ${matchup.myGames} games left for you, ${matchup.oppGames} for ${matchup.opp.name}.`);
-    else note('bad', 'Matchup', `On pace to lose by ${Math.round(-diff)}`, `${wp}% win chance. You need volume: stream players who play on your open days.`);
+    else note('bad', 'Matchup', `On pace to lose by ${Math.round(-diff)}`, `${wp}% win chance.${skip ? '' : ' You need volume: stream players who play on your open days.'}`);
   } else if (matchup?.bye) note('info', 'Matchup', 'Bye week', 'No matchup this period.');
+  if (skip) {
+    const nextF = focusPeriods(m, my.id)[0];
+    const g = m.matchups.find(x => x.period === nextF && hasTeam(x, my.id) && realGame(x));
+    const vs = g && team(g.home.teamId === my.id ? g.away.teamId : g.home.teamId);
+    note('info', 'Focus', 'Not one of your focus matchups',
+      `This week counts for nothing, so no streams. Next focus matchup: ${nextF > m.regularPeriods ? `playoff round ${playoffPeriods(m).indexOf(nextF) + 1}` : `week ${nextF}`}${vs ? ` vs ${vs.name}` : ''} (${periodRange(m, nextF)}). Set your lineup anyway: it's free.`);
+  }
 
   const lc = off ? null : lineupCheck(m, my, basis);
   if (lc && lc.gain >= 1 && lc.start.length) {
@@ -908,13 +974,13 @@ export function analyze(m, basis = 'smart') {
     const benchOut = my.roster.filter(p => p.slot === 12 && isOut(p));
     if (benchOut.length) note('info', 'IR', 'Open IR slot', `Move ${benchOut.map(p => p.name).join(', ')} to IR and use the spot for a streamer.`);
   }
-  const open = off ? [] : base.days.filter(d => d.open > 0);
+  const open = quiet ? [] : base.days.filter(d => d.open > 0);
   const openTotal = open.reduce((a, d) => a + d.open, 0);
   if (openTotal) {
     note('warn', 'Lineup', `${openTotal} empty slot${openTotal > 1 ? 's' : ''} left this week`,
       open.map(d => `${fmtDow(spDate(m, d.sp))} ${d.open}`).join(', ') + '. Each one is free points for a streamer.');
   }
-  const benched = off ? 0 : base.days.reduce((a, d) => a + d.benched, 0);
+  const benched = quiet ? 0 : base.days.reduce((a, d) => a + d.benched, 0);
   if (benched >= 3) note('info', 'Lineup', `${benched} games stuck on your bench`, 'Too many players on the same nights. Trade volume for someone who plays your light days.');
 
   const hot = [], cold = [];
@@ -943,7 +1009,7 @@ export function analyze(m, basis = 'smart') {
       down.slice(0, 3).map(x => `${x.p.name} ${Math.round((x.factor - 1) * 100)}%${why(x) ? ` (${why(x)} back)` : ''}`).join(', ') + '.');
   }
 
-  const plan = off ? [] : streamPlan(m, my, basis, addsLeft(m, my));
+  const plan = quiet ? [] : streamPlan(m, my, basis, addsLeft(m, my));
   if (plan.length) {
     const total = plan.reduce((a, x) => a + x.gain, 0);
     note('good', 'Stream', `Streaming plan: +${Math.round(total)} pts this week`,
@@ -959,7 +1025,7 @@ export function analyze(m, basis = 'smart') {
   }
   if (!notes.length) note('good', 'Lineup', 'Clean lineup', 'No injured starters and no open slots.');
 
-  return { my, rem, base, matchup, waivers, drop, dropV, feedback: notes, lineup: lc, plan, off };
+  return { my, rem, base, matchup, waivers, drop, dropV, feedback: notes, lineup: lc, plan, off, skip };
 }
 
 // ---- Season-long evaluation: team needs, trade ideas, targets, power rankings
@@ -974,8 +1040,24 @@ export function futureDays(m) {
 // Shared sampled window + scorer so every trade is compared on identical days.
 // S(roster, team): projected points over the days that count for that team.
 export function seasonContext(m, basis, max = 48) {
-  const { days, scale } = sampleDays(futureDays(m), max);
-  return { days, scale, S: (roster, team) => projectDays(m, roster, days, basis, false, team ? dayWeights(m, team.id, basis).sp : null).total * scale };
+  const all = futureDays(m);
+  const fp = focus.team != null ? focusPeriods(m, focus.team) : null;
+  if (!fp) {
+    const { days, scale } = sampleDays(all, max);
+    return { days, scale, S: (roster, team) => projectDays(m, roster, days, basis, false, team ? dayWeights(m, team.id, basis).sp : null).total * scale };
+  }
+  // With focus matchups, the focused team's season is just those weeks, and sampling one
+  // day in four of them is far too noisy. That team gets its own sample: every focus day
+  // (or a dense sample if there are many). Everyone else keeps the usual one.
+  const keep = new Set(fp.flatMap(id => m.periods[id] || []));
+  const f = sampleDays(all.filter(sp => keep.has(sp)), Math.max(max, 60));
+  const r = sampleDays(all, max);
+  return {
+    days: f.days, scale: f.scale,
+    S: (roster, team) => (team?.id === focus.team
+      ? projectDays(m, roster, f.days, basis, false, dayWeights(m, team.id, basis).sp).total * f.scale
+      : projectDays(m, roster, r.days, basis, false, team ? dayWeights(m, team.id, basis).sp : null).total * r.scale),
+  };
 }
 // Same on every remaining day (exact re-checks).
 export function exactScorer(m, basis) {
@@ -1294,7 +1376,7 @@ export function weeklySlate(m, my, period, basis, fas) {
   const pool = fas.filter(p => !p.outForSeason && gamesIn(m, p, left) > 0)
     .sort((a, b) => value(b, basis) * gamesIn(m, b, left) - value(a, basis) * gamesIn(m, a, left)).slice(0, 40);
   const adds = {};
-  const off = periodWeight(m, my.id, period, basis) === 0 ? offReason(m, period) : null;
+  const off = periodWeight(m, my.id, period, basis) === 0 ? offReason(m, period, my.id, basis) : null;
   for (const d of off ? [] : left) {
     const rest = left.filter(sp => sp >= d);
     const base = projectDays(m, my.roster, rest, basis).total;
