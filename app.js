@@ -1386,6 +1386,96 @@ function vTargets() {
   return `<section class="card"><h3>Targets <span class="r muted small">who'd add the most to your lineup, before what you give up</span></h3>${rows || '<p class="muted">Nobody on another roster beats your current lineup.</p>'}</section>`;
 }
 
+// Your lineup before vs after a trade: games started, empty slots and benched games per
+// week (your focus weeks, or the next few), then a Roster-style day grid for one week
+// showing who starts, sits or is out, with incoming players tagged and outgoing ones faded.
+function vTradeLineup(after, inIds, outPlayers) {
+  const { an, model: m } = state;
+  const b = state.settings.basis;
+  const before = an.my.roster;
+  const f = focusLeft();
+  const remaining = Object.keys(m.periods).map(Number).filter(id => id >= m.currentPeriod && daysLeftOf(id).length).sort((x, y) => x - y);
+  const weeks = f || remaining.slice(0, 6);
+  if (!weeks.length) return '';
+  let wk = state.trade.wk;
+  if (!weeks.includes(wk)) wk = weeks[0];
+  const proj = (roster, sps) => A.projectDays(m, roster, sps, b, true);
+  const sum = (r, k) => r.days.reduce((a, d) => a + (k === 'starts' ? d.starters.length : d[k]), 0);
+  const per = weeks.map(id => {
+    const sps = daysLeftOf(id);
+    return { id, b: proj(before, sps), a: proj(after, sps) };
+  });
+  const arrow = (x, y, goodUp = true) => {
+    const dlt = y - x, cls = Math.abs(dlt) < 0.5 ? 'muted' : (dlt > 0) === goodUp ? 'up' : 'down';
+    return `${f0(x)} → <b>${f0(y)}</b> <span class="small ${cls}">${dlt ? signed(dlt) : '±0'}</span>`;
+  };
+  const row = (label, r0, r1, cls = '') => `<tr class="${cls}"><td>${label}</td>
+      <td class="num">${arrow(sum(r0, 'starts'), sum(r1, 'starts'))}</td>
+      <td class="num">${arrow(sum(r0, 'open'), sum(r1, 'open'), false)}</td>
+      <td class="num">${arrow(sum(r0, 'benched'), sum(r1, 'benched'), false)}</td>
+      <td class="num">${signed(r1.total - r0.total)}</td></tr>`;
+  const rest = f ? null : (() => { const sps = A.futureDays(m); return { b: proj(before, sps), a: proj(after, sps) }; })();
+  const total = f ? { b: { days: per.flatMap(x => x.b.days), total: per.reduce((a, x) => a + x.b.total, 0) }, a: { days: per.flatMap(x => x.a.days), total: per.reduce((a, x) => a + x.a.total, 0) } } : rest;
+  const wkLabel = id => { const o = oppIn(id); return `${wkName(id)}${o ? ` <span class="small muted">vs ${esc(o.name)}</span>` : ''}`; };
+  const summary = `<div class="scrollx"><table class="impact"><thead><tr><th>Week</th><th class="num" title="Games your players start in the best daily lineup">Games started</th><th class="num" title="Lineup slots nobody can fill">Empty slots</th><th class="num" title="Games lost because the lineup is full that night">Benched</th><th class="num">Points</th></tr></thead><tbody>
+      ${per.map(x => row(`<button class="link wklink" data-act="twk" data-p="${x.id}">${wkLabel(x.id)}</button>`, x.b, x.a, x.id === wk ? 'me' : '')).join('')}
+      ${row(f ? 'All your focus weeks' : 'Rest of the season', total.b, total.a, 'sum')}</tbody></table></div>`;
+
+  // Day grid for the chosen week.
+  const sps = m.periods[wk] || [];
+  const x = per.find(y => y.id === wk);
+  const planOf = r => Object.fromEntries(r.days.map(d => [d.sp, new Set(d.starters.map(p => p.id))]));
+  const pa = planOf(x.a), pb = planOf(x.b);
+  const startsIn = (plan, p) => Object.values(plan).filter(s => s.has(p.id)).length;
+  // Games left on his schedule that week, injured or not.
+  const gamesLeft = p => daysLeftOf(wk).filter(sp => A.gameOn(m, p, sp) && A.gameLeft(m, p, sp)).length;
+  const dayHead = sps.map(sp => {
+    const d = A.spDate(m, sp);
+    return `<th class="day ${sp === m.currentSP ? 'today' : sp < m.currentSP ? 'past' : ''}">${A.fmtDow(d)}<br>${d.getDate()}</th>`;
+  }).join('');
+  const cell = (p, sp, plan) => {
+    const g = A.gameOn(m, p, sp);
+    const past = sp < m.currentSP;
+    if (!g) return `<td class="day ${past ? 'past' : ''}"></td>`;
+    const opp = m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || '';
+    let st = '', tip = `${g.home ? 'vs' : '@'} ${opp}`;
+    if (plan[sp] && A.gameLeft(m, p, sp)) {
+      if (sp < (p.joinSP || 0)) tip += ' · before the assumed pickup';
+      else if (!A.availableOn(m, p, sp)) { st = 'inj'; tip += ` · out (${A.returnLabel(p)})`; }
+      else if (plan[sp].has(p.id)) { st = 'st'; tip += ' · starts'; }
+      else { st = 'bn'; tip += ' · sits: lineup full that day'; }
+    }
+    if (A.isB2B(m, p, sp)) tip += ' · back-to-back';
+    return `<td class="day ${past ? 'past' : ''}"><span class="gm ${g.home ? 'home' : ''} ${A.isB2B(m, p, sp) ? 'b2b' : ''} ${st}" title="${esc(tip)}">${g.home ? '' : '@'}${esc(opp)}</span></td>`;
+  };
+  // Assumed pickups for an open roster spot only exist inside the projection.
+  const fills = [...new Map(x.a.days.flatMap(d => d.starters).filter(p => p.fill).map(p => [p.id, p])).values()];
+  const stay = [...after, ...fills].sort((p, q) => startsIn(pa, q) - startsIn(pa, p) || val(q) - val(p));
+  const tag = p => (p.fill ? '<span class="badge b-wv" title="Open roster spot: assumed pickup of the best free agent once adds reset">PICKUP</span>' : inIds.has(p.id) ? '<span class="badge b-up">NEW</span>' : '');
+  const rows = [
+    ...stay.map(p => `<tr class="${inIds.has(p.id) ? 'incoming' : ''}"><td>${pCell(p, tag(p))}</td><td class="num">${f1(val(p))}</td><td class="num"><b>${startsIn(pa, p)}</b><small class="muted">/${gamesLeft(p)}</small></td>${sps.map(sp => cell(p, sp, pa)).join('')}</tr>`),
+    ...outPlayers.map(p => `<tr class="gone"><td>${pCell(p, '<span class="badge b-gone">GONE</span>')}</td><td class="num">${f1(val(p))}</td><td class="num">${startsIn(pb, p)}<small class="muted">/${gamesLeft(p)}</small></td>${sps.map(sp => cell(p, sp, pb)).join('')}</tr>`),
+  ].join('');
+  const dA = Object.fromEntries(x.a.days.map(d => [d.sp, d])), dB = Object.fromEntries(x.b.days.map(d => [d.sp, d]));
+  const foot = sps.map(sp => {
+    const a = dA[sp], z = dB[sp];
+    if (!a || !z) return '<td class="day"></td>';
+    const dl = a.starters.length - z.starters.length;
+    return `<td class="day"><span class="cnt ${a.open ? 'under' : ''}" title="Starters: ${z.starters.length} before, ${a.starters.length} after (of ${m.starters} slots)">${z.starters.length}→${a.starters.length}</span>${dl ? `<br><span class="small ${dl > 0 ? 'up' : 'down'}">${signed(dl)}</span>` : ''}</td>`;
+  }).join('');
+  const nav = weeks.map(id => `<button class="chip ${id === wk ? 'on' : ''}" data-act="twk" data-p="${id}">${wkName(id)}</button>`).join('');
+  return `<div class="rk-label" style="margin-top:16px">Your lineup before → after${f ? ' <span class="muted">(your focus weeks)</span>' : ''}</div>
+    ${summary}
+    <div class="chips" style="margin:12px 0 8px">${nav}<span class="muted small" style="margin-left:6px">${A.periodRange(m, wk)}${wk === m.currentPeriod ? ' · remaining days' : ''}</span></div>
+    <div class="scrollx"><table class="tlineup">
+      <thead><tr><th>Player</th><th class="num">Proj/G</th><th class="num" title="Games he starts that week / games on his schedule">Starts</th>${dayHead}</tr></thead>
+      <tbody>${rows}</tbody>
+      <tfoot><tr><td colspan="3" class="num">Starters, before → after</td>${foot}</tr></tfoot>
+    </table></div>
+    <p class="muted small"><span class="key st">Outlined</span> = starts in your best lineup after the trade, <span class="key bn">faded</span> = sits (lineup full), <span class="key inj">red</span> = injured. NEW = coming in; GONE = leaving (their games shown as they'd have been for you). Red count = an empty slot that night.</p>`;
+}
+const daysLeftOf = id => A.daysLeft(state.model, id);
+
 function vTrade() {
   const { an, model: m } = state;
   const b = state.settings.basis;
@@ -1453,7 +1543,8 @@ function vTrade() {
       <p class="verdict ${good ? 'up' : 'down'}">${good ? 'Good for' : 'Bad for'} ${esc(an.my.name)}: ${fWins != null ? `${signed(fWins, 2)} expected wins in your focus matchups (${signed(verdict)} projected points in them)` : `${signed(verdict)} projected points, ${horizon()}`}.</p><p class="muted small" style="margin-top:4px">${focusLeft() ? `Your column counts only your focus matchups${z ? `; ${esc(poss(partner.name))} covers the ${playoffsOn() ? 'rest of their season + playoffs' : 'rest of their regular season'}` : ''}.${otherWks < -10 ? ` You lose ${f0(-otherWks)} projected points in your other weeks, which is fine: they don't count.` : ''}` : `Bye weeks count for nothing on either side${playoffsOn() ? ' (a likely first-round playoff bye counts for little)' : ''}.`}
         ${z ? `<span class="muted">${esc(partner.name)}: ${signed(theirs2)}${verdict > 0 && theirs2 > 0 ? ' — good for both, easy sell.' : verdict > 0 && vGive >= vGet * 0.97 ? ' — looks fair to them on paper.' : ''}</span>` : ''}</p>
       ${drops.length ? `<p class="muted small">Roster spots: ${drops.join('; ')}. A team left a player short fills the spot with the best free agent for its lineup.</p>` : ''}
-      ${faNote.length ? `<p class="muted small">${faNote.join('; ')}. That part isn't counted above, since it doesn't need the trade.</p>` : ''}`;
+      ${faNote.length ? `<p class="muted small">${faNote.join('; ')}. That part isn't counted above, since it doesn't need the trade.</p>` : ''}
+      ${vTradeLineup(a.roster, new Set([...get, ...a.adds].map(p => p.id)), [...give, ...a.drops])}`;
   }
   const bs = A.buySell(m, an.my.id, b);
   const bsRow = (x, act) => `<div class="pick">${pCell(x.p)}<div class="meta">${f1(x.p.stats.l15.avg)}<small> L15</small><br>${f1(x.p.stats.season.avg)}<small> season</small></div>
@@ -1979,6 +2070,7 @@ document.addEventListener('click', async e => {
   if (act === 'slwk') { if (t.dataset.p !== '') { state.slatePeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
   if (act === 'trend') { state.trend.mode = t.dataset.v; state.keepScroll = true; render(); return; }
   if (act === 'wk') { if (t.dataset.p !== '') { state.boardPeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
+  if (act === 'twk') { state.trade.wk = +t.dataset.p; state.keepScroll = true; render(); return; }
   if (act === 'trade-clear') { state.trade.give = []; state.trade.get = []; state.keepScroll = true; render(); return; }
   if (act === 'target') { openFinder('get', +t.dataset.id); return; }
   if (act === 'faway') { openFinder('away', +t.dataset.id); return; }

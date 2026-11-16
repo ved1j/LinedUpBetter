@@ -609,3 +609,10 @@ tr.focus td { background: var(--volt-soft); }
 /* Rows that don't count (focus mode) */
 tr.ignored td { color: var(--muted); }
 tr.ignored td .small { font-size: 11px; }
+
+/* Trade analyzer: lineup before -> after */
+.b-gone { background: none; color: var(--bad); border: 1px solid rgba(255, 90, 78, .45); }
+table.tlineup tr.gone td { opacity: .55; }
+table.tlineup tr.incoming td:first-child { box-shadow: inset 2px 0 0 var(--volt); }
+table.tlineup tfoot td { padding-top: 8px; }
+.wklink { text-align: left; text-transform: none; letter-spacing: 0; font-family: var(--body); font-size: 13px; }
