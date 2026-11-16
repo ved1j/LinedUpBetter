@@ -1199,6 +1199,8 @@ function rateIdea(myGain, theirGain, giveV, getV) {
   if (giveV >= getV * 0.88 && theirGain >= -1.0 * myGain) return { kind: 'ask', score: myGain + 1.5 * theirGain };
   return null;
 }
+// Rate a scored deal (from dealEvaluator) the way trade ideas are: null if it doesn't qualify.
+export const rateDeal = d => rateIdea(d.myGain, d.theirGain, d.paperGive, d.paperGet);
 
 // Re-score screened ideas on every remaining day (no sampling), so the numbers match
 // the trade analyzer exactly. Returns a function that refines one idea (or null if it
@@ -1284,6 +1286,15 @@ export function finderCandidates(m, my, basis, mode, arg, locked = new Set()) {
       const gets = [...theirs.slice(0, 10).map(p => [p]), ...pairs(theirs.slice(0, 7))];
       for (const g of myGives) for (const x of gets) add(g, x, t);
     }
+  } else if (mode === 'team') {
+    // Every 1-for-1, 2-for-1, 1-for-2 and 2-for-2 between your roster and one team's,
+    // wider than the background scan (which skims every team).
+    const t = m.teams.find(x => x.id === arg);
+    if (!t || t.id === my.id) return [];
+    const theirs = t.roster.filter(wanted).sort((a, b) => v(b) - v(a));
+    const gets = [...theirs.map(p => [p]), ...pairs(theirs.slice(0, 10))];
+    const myGives = [...mine.map(p => [p]), ...pairs(mine.slice(0, 10))];
+    for (const g of myGives) for (const x of gets) add(g, x, t);
   } else if (mode === 'need') {
     const targets = m.teams.filter(t => t.id !== my.id)
       .flatMap(t => t.roster.filter(p => wanted(p) && (p.eligible || []).includes(arg)).map(p => ({ p, t })))

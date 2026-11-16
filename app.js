@@ -1142,7 +1142,7 @@ function dealCard(x, label, cls, openAttrs) {
 }
 
 // ---- Trade finder: aim the search at a player you want, one you'd move, or a position.
-const FINDER_MODES = { get: 'Get a player', away: 'Trade away', need: 'Fill a position' };
+const FINDER_MODES = { team: 'Trade with a team', get: 'Get a player', away: 'Trade away', need: 'Fill a position' };
 const POSITIONS = ['PG', 'SG', 'SF', 'PF', 'C'];
 const lockedIds = () => new Set(state.an.my.roster.filter(p => isLocked(p.id)).map(p => p.id));
 const finderKey = f => `${scanKey()}:${f.mode}:${f.arg}:${[...lockedIds()].join(',')}`;
@@ -1165,6 +1165,10 @@ async function runFinder() {
   // Rank by your gain, minus part of what it costs them: a deal that's fair on names but
   // wrecks their lineup is a harder sell to a manager paying attention.
   const rank = d => d.myGain + 0.6 * Math.min(0, d.theirGain);
+  // A team search is rated like trade ideas (win-win, fair on paper, worth asking), which
+  // weighs what a deal costs them much harder, so deals they'd say yes to come first.
+  const team = f.mode === 'team';
+  const order = team ? (x, y) => y.score - x.score : (x, y) => rank(y) - rank(x);
   if (!await chunked(cands, c => {
     const d = screen(c.give, c.get, c.partner);
     if (d.paperGive / d.paperGet >= 0.85) screened.push(d);
@@ -1172,22 +1176,25 @@ async function runFinder() {
   // Exact re-check of the best, keeping variety (no package or return repeated 3+ times).
   const exact = A.dealEvaluator(m, my, b, A.exactScorer(m, b), true);
   const queue = [], seen = {};
-  for (const d of screened.sort((x, y) => rank(y) - rank(x))) {
+  const pool = team ? screened.map(d => { const r = A.rateDeal(d); return r && { ...d, ...r }; }).filter(Boolean) : screened;
+  for (const d of pool.sort(order)) {
     const gk = d.give.map(p => p.id).sort().join(','), tk = `${d.partner.id}>${d.get.map(p => p.id).sort().join(',')}`;
     if ((seen[gk] || 0) >= 2 || (seen[tk] || 0) >= 2) continue;
     seen[gk] = (seen[gk] || 0) + 1; seen[tk] = (seen[tk] || 0) + 1;
     queue.push(d);
-    if (queue.length >= 30) break;
+    if (queue.length >= (team ? 40 : 30)) break;
   }
   const results = [];
+  const refine = team ? A.makeRefiner(m, my, b) : null;
   if (!await chunked(queue, d => {
+    if (team) { const r = refine(d); if (r) results.push(r); return; }
     const x = exact(d.give, d.get, d.partner);
     const acc = A.acceptance(x);
     if (acc) results.push({ ...x, kind: acc });
   }, frac => finderProgress(0.75 + 0.25 * frac, 'Double-checking the best on every remaining day…'), live)) return;
   // Variety: no single player (other than the one you searched for) in more than 4 results.
-  const anchor = f.mode === 'need' ? null : f.arg, uses = {}, picked = [];
-  for (const x of results.sort((a, b) => rank(b) - rank(a))) {
+  const anchor = f.mode === 'get' || f.mode === 'away' ? f.arg : null, uses = {}, picked = [];
+  for (const x of results.sort(order)) {
     const ids = [...x.give, ...x.get].map(p => p.id).filter(id => id !== anchor);
     if (ids.some(id => (uses[id] || 0) >= 4)) continue;
     ids.forEach(id => { uses[id] = (uses[id] || 0) + 1; });
@@ -1213,12 +1220,15 @@ function openFinder(mode, arg) {
 
 function vFinder() {
   const { an, model: m } = state;
-  const f = state.finder ||= { mode: 'get', arg: null, status: 'idle' };
+  const f = state.finder ||= { mode: 'team', arg: null, status: 'idle' };
   if (f.status === 'done' && f.key !== finderKey(f)) setTimeout(runFinder, 0); // data or settings changed
   const tv = p => f1(A.marketValue(m, p, state.settings.basis));
   const modes = Object.entries(FINDER_MODES).map(([k, t]) => `<button class="chip ${f.mode === k ? 'on' : ''}" data-act="fmode" data-v="${k}">${t}</button>`).join('');
   let picker;
-  if (f.mode === 'get') {
+  if (f.mode === 'team') {
+    picker = `<select class="fsel" data-act="farg"><option value="">Pick a team to trade with…</option>${m.teams.filter(t => t.id !== an.my.id)
+      .map(t => `<option value="${t.id}" ${f.arg === t.id ? 'selected' : ''}>${esc(t.name)} · ${t.wins}-${t.losses}</option>`).join('')}</select>`;
+  } else if (f.mode === 'get') {
     const groups = m.teams.filter(t => t.id !== an.my.id).map(t => `<optgroup label="${esc(t.name)}">${t.roster.slice().sort((a, b) => val(b) - val(a))
       .map(p => `<option value="${p.id}" ${f.arg === p.id ? 'selected' : ''} ${isBanned(p.id) ? 'disabled' : ''}>${isBanned(p.id) ? '🚫 ' : ''}${esc(p.name)} · ${f1(val(p))} proj/G · TV ${tv(p)}</option>`).join('')}</optgroup>`).join('');
     picker = `<select class="fsel" data-act="farg"><option value="">Pick a player you want…</option>${groups}</select>`;
@@ -1228,24 +1238,34 @@ function vFinder() {
   } else {
     picker = `<span class="chips" style="margin:0">${POSITIONS.map(p => `<button class="chip ${f.arg === p ? 'on' : ''}" data-act="fpos" data-v="${p}">${p}</button>`).join('')}</span>`;
   }
+  // With a team picked: where its lineup is thin or deep, and its bench players who rarely start.
+  let about = '';
+  const pt = f.mode === 'team' && f.arg != null ? m.teams.find(t => t.id === f.arg) : null;
+  if (pt) {
+    const needs = getNeeds(), n = needs.byTeam[pt.id];
+    const parts = [n.weak.length ? `weakest at <b>${n.weak.map(needs.label).join(', ')}</b>` : '', n.strong.length ? `strongest at <b>${n.strong.map(needs.label).join(', ')}</b>` : ''].filter(Boolean);
+    const chips = n.chips.slice(0, 3).map(c => esc(c.p.name));
+    about = `<p class="small" style="margin:0 0 10px"><button class="tlink" data-view="${pt.id}">${esc(pt.name)}</button> (${pt.wins}-${pt.losses}) is ${parts.join(' and ') || 'balanced across the lineup'}.${chips.length ? ` Bench players they rarely start: ${chips.join(', ')}.` : ''}</p>`;
+  }
   let body = '';
   if (f.status === 'running') {
     body = `<div class="scan"><div class="scanbar"><i id="finder-bar" style="width:0%"></i></div><p class="muted small" id="finder-msg">Building possible deals…</p></div>`;
   } else if (f.status === 'done') {
     const label = { likely: 'Likely yes', possible: 'Possible' };
     body = f.results.length
-      ? `<div class="ideas">${f.results.map((x, i) => dealCard(x, label[x.kind], x.kind, `data-act="fopen" data-i="${i}"`)).join('')}</div>
-         <p class="muted small">Sorted by what each deal adds to your lineup over the ${horizon()}, discounted when it costs them a lot (a harder sell). Likely yes = they get at least as much trade value as they give; possible = within ~10%, expect a counter. A negative number for you = the price of the player you asked for.</p>`
-      : `<p class="muted">No deal they'd plausibly accept turned up. Try another player, or unlock someone on your roster.</p>`;
+      ? `<div class="ideas">${f.results.map((x, i) => dealCard(x, label[x.kind] || A.IDEA_KINDS[x.kind], x.kind, `data-act="fopen" data-i="${i}"`)).join('')}</div>
+         ${f.mode === 'team' ? `<p class="muted small">Best first, weighing what each deal costs them, over the ${horizon()}. Win-win = both teams project to score more and it's close on trade value. Fair on paper = they get at least as much trade value and lose little. Worth asking = close on trade value but it costs them more, so expect a counter.</p>` : `<p class="muted small">Sorted by what each deal adds to your lineup over the ${horizon()}, discounted when it costs them a lot (a harder sell). Likely yes = they get at least as much trade value as they give; possible = within ~10%, expect a counter. A negative number for you = the price of the player you asked for.</p>`}`
+      : `<p class="muted">No deal ${pt ? esc(pt.name) : 'they'}'d plausibly accept turned up. ${pt ? 'Try another team' : 'Try another player'}, or unlock someone on your roster.</p>`;
   } else {
-    body = `<p class="muted small">${f.mode === 'get' ? 'Choose any player on another team: the finder builds packages from your roster (adding one of their role players to balance it when that helps) and keeps the ones they would plausibly accept.'
+    body = `<p class="muted small">${f.mode === 'team' ? 'Choose a team: the finder tries every 1-for-1, 2-for-1, 1-for-2 and 2-for-2 between your roster and theirs (deeper than the trade ideas below) and keeps the deals they would plausibly accept.'
+      : f.mode === 'get' ? 'Choose any player on another team: the finder builds packages from your roster (adding one of their role players to balance it when that helps) and keeps the ones they would plausibly accept.'
       : f.mode === 'away' ? 'Choose one of your players: the finder checks every team for the best return, alone or with one of your lesser players added.'
       : 'Choose a position: the finder looks at the best players there on other teams and what it would take to get them.'} Players you mark 🔒 untouchable are never offered.</p>`;
   }
   return `<section class="card" id="finder"><h3>Trade finder</h3>
     <div class="chips finder-modes">${modes}</div>
     <div class="finder-pick">${picker}</div>
-    ${body}</section>`;
+    ${about}${body}</section>`;
 }
 
 function vTradeIdeas() {
@@ -1280,7 +1300,8 @@ function vTradeIdeas() {
   const cards = shown.map(x => dealCard(x, A.IDEA_KINDS[x.kind], x.kind, `data-act="idea" data-i="${sc.ideas.indexOf(x)}"`)).join('');
   const more = list.length > shown.length
     ? `<button class="btn morebtn" data-act="more-ideas">Show ${Math.min(10, list.length - shown.length)} more <small>(${list.length - shown.length} left)</small></button>` : '';
-  return `<section class="card">${head}${filters}
+  const deeper = f.partner !== 'all' ? `<p class="small" style="margin:0 0 10px"><button class="link" data-act="fteam" data-id="${f.partner}">Search every deal with ${esc(m.teams.find(t => t.id === f.partner)?.name || 'them')}</button> <span class="muted">in the trade finder: more deal shapes than the quick scan</span></p>` : '';
+  return `<section class="card">${head}${filters}${deeper}
     <div class="ideas">${cards || '<p class="muted">No ideas match these filters.</p>'}</div>${more}
     <p class="muted small">Win-win = both teams project to score more. Fair on paper = they get at least as much Proj/G and lose little in fit. Worth asking = close in value on paper, but it costs them more, so expect a counter. Gains are projected points over the rest of the regular season plus playoffs.</p></section>`;
 }
@@ -1383,7 +1404,7 @@ function vTrade() {
   return `${vFinder()}${vTradeIdeas()}
     <div class="grid2" id="analyzer">
       <section class="card"><h3>You give <span class="r">${esc(an.my.name)}</span></h3><div class="tlist">${pick(mine, 'give')}</div></section>
-      <section class="card"><h3>You get <select class="tsel" data-act="partner">${others.map(t => `<option value="${t.id}" ${t.id === tr.partner ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select></h3><div class="tlist">${pick(theirs, 'get')}</div></section>
+      <section class="card"><h3>You get <select class="tsel" data-act="partner">${others.map(t => `<option value="${t.id}" ${t.id === tr.partner ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>${partner ? `<span class="r"><button class="link" data-act="fteam" data-id="${partner.id}" title="Find the best deals with ${esc(partner.name)} in the trade finder">Find deals</button></span>` : ''}</h3><div class="tlist">${pick(theirs, 'get')}</div></section>
     </div>
     <section class="card"><h3>Trade analyzer <span class="r">${give.length || get.length ? '<button class="link" data-act="trade-clear">Clear</button>' : ''}</span></h3>${result}</section>
     <div class="grid2">${vTargets()}${vNeeds()}</div>
@@ -1904,6 +1925,7 @@ document.addEventListener('click', async e => {
   if (act === 'trade-clear') { state.trade.give = []; state.trade.get = []; state.keepScroll = true; render(); return; }
   if (act === 'target') { openFinder('get', +t.dataset.id); return; }
   if (act === 'faway') { openFinder('away', +t.dataset.id); return; }
+  if (act === 'fteam') { openFinder('team', +t.dataset.id); return; }
   if (act === 'fmode') {
     if (state.finder.mode !== t.dataset.v) state.finder = { mode: t.dataset.v, arg: null, status: 'idle' };
     state.keepScroll = true; render(); return;
