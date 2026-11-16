@@ -1793,7 +1793,53 @@ function vSlate() {
       ${s.off ? `<p class="warnline"><b>${esc(s.off.title)}:</b> ${esc(s.off.detail)}</p>` : ''}
       <div class="sdays">${days}</div>
       <p class="muted small">Starts = games your best lineup uses each night (open = empty slots to stream into). Spend an add here = the free agent who adds the most from that night to the end of the week, replacing one of your three least useful players. Banned players are never suggested.</p></section>
-    <section class="card"><h3>Games per NBA team <span class="r muted small">this week · B2B = back-to-back</span></h3><div class="tgroups">${groups}</div></section>`;
+    ${vNbaWeek(s, groups)}`;
+}
+
+// Every NBA team's games in the slate week, night by night: opponent, home or away,
+// back-to-backs, and which of your (and your opponent's) players are on each team.
+// Nights you have empty lineup slots are highlighted: a team playing then is where a
+// streamer would actually start.
+function vNbaWeek(s, groups) {
+  const { an, model: m } = state;
+  const sort = state.nbaSort || 'games';
+  const days = s.days;
+  const live = sp => s.left.includes(sp);
+  const open = Object.fromEntries(s.perDay.map(d => [d.sp, !d.past && d.mine ? d.mine.open : 0]));
+  const nba = Object.fromEntries(s.perDay.map(d => [d.sp, d.nba]));
+  const names = team => { const by = {}; for (const p of team?.roster || []) (by[p.proTeamId] ||= []).push(p.name.split(' ').slice(-1)[0]); return by; };
+  const mine = names(an.my), theirs = names(s.opp);
+  const rows = Object.entries(m.proTeams).filter(([, t]) => t.abbrev && Object.keys(t.games || {}).length).map(([id, t]) => {
+    const g = days.filter(sp => t.games[sp]);
+    return { id: +id, t, games: g.length, left: g.filter(live).length, b2b: g.filter(sp => t.games[sp - 1]).length, openG: g.filter(sp => live(sp) && open[sp] > 0).length };
+  });
+  const key = { games: r => r.games * 100 + r.left * 10 + r.openG, left: r => r.left * 100 + r.openG * 10 + r.games, open: r => r.openG * 100 + r.left * 10 + r.games }[sort] || (r => r.games);
+  rows.sort((a, b) => key(b) - key(a) || a.t.abbrev.localeCompare(b.t.abbrev));
+  const head = days.map(sp => {
+    const d = A.spDate(m, sp), n = nba[sp];
+    return `<th class="day ${sp === m.currentSP ? 'today' : !live(sp) ? 'past' : ''}" title="${n} NBA games${n <= 5 ? ' (light night)' : ''}${open[sp] ? ` · you have ${open[sp]} empty lineup slot${open[sp] > 1 ? 's' : ''}` : ''}">${A.fmtDow(d)}<br>${d.getDate()}<br><span class="small ${n <= 5 ? 'up' : 'muted'}">${n}g</span>${open[sp] ? `<span class="openmark">${open[sp]}</span>` : ''}</th>`;
+  }).join('');
+  const cell = (t, sp) => {
+    const g = t.games[sp];
+    if (!g) return `<td class="day ${live(sp) ? '' : 'past'}"></td>`;
+    const opp = m.proTeams[g.opp]?.abbrev || PRO_ABBR[g.opp] || '';
+    const b2b = !!t.games[sp - 1], fill = live(sp) && open[sp] > 0;
+    return `<td class="day ${live(sp) ? '' : 'past'}"><span class="gm ${g.home ? 'home' : ''} ${b2b ? 'b2b' : ''} ${fill ? 'fill' : ''}" title="${g.home ? 'vs' : '@'} ${esc(opp)}${fill ? ' · a night you have an empty lineup slot' : ''}${b2b ? ' · back-to-back' : ''}">${g.home ? '' : '@'}${esc(opp)}</span></td>`;
+  };
+  const body = rows.map(r => `<tr class="${mine[r.id] ? 'mine' : ''}">
+      <td><b>${esc(r.t.abbrev)}</b> <span class="small muted">${esc(r.t.name || '')}</span></td>
+      <td class="num"><b>${r.games}</b></td><td class="num">${r.left}</td>
+      <td class="num ${r.openG ? 'up' : 'muted'}">${r.openG}</td><td class="num ${r.b2b ? 'warn' : 'muted'}">${r.b2b || '–'}</td>
+      ${days.map(sp => cell(r.t, sp)).join('')}
+      <td class="small">${esc((mine[r.id] || []).join(', '))}</td>${s.opp ? `<td class="small muted">${esc((theirs[r.id] || []).join(', '))}</td>` : ''}</tr>`).join('');
+  const chip = (v, label) => `<button class="chip ${sort === v ? 'on' : ''}" data-act="nbasort" data-v="${v}">${label}</button>`;
+  return `<section class="card" id="nbaweek"><h3>NBA schedule <span class="r muted small">every team, night by night · ${A.periodRange(m, s.period)}</span></h3>
+    <div class="tgroups" style="margin-bottom:14px">${groups}</div>
+    <div class="chips">${chip('games', 'Most games')}${chip('left', 'Most games left')}${chip('open', 'Most on your empty nights')}</div>
+    <div class="scrollx"><table class="nbaweek"><thead><tr><th>Team</th><th class="num" title="Games this week">G</th><th class="num" title="Games still to play this week">Left</th><th class="num" title="Games left on nights you have an empty lineup slot">Empty nights</th><th class="num" title="Back-to-backs">B2B</th>${head}<th>Your players</th>${s.opp ? `<th>${esc(s.opp.name)}</th>` : ''}</tr></thead>
+      <tbody>${body}</tbody></table></div>
+    <p class="muted small">Top: teams grouped by games this week (B2B = back-to-back). In the grid, a highlighted game is on a night you have an empty lineup slot, so a player from that team would start for you; the red number under a day is how many slots are empty. Under each day: NBA games that night (light nights in green, when fewer of your players play). Dot = back-to-back, @ = road game.</p>
+  </section>`;
 }
 
 // ---- Injury report
@@ -2080,6 +2126,7 @@ document.addEventListener('click', async e => {
   if (act === 'funjump') { document.getElementById(t.dataset.v)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); return; }
   if (act === 'prinj') { state.pr.inj = state.pr.inj === false; state.pr.limit = 50; state.keepScroll = true; render(); return; }
   if (act === 'prmore') { state.pr.limit += 50; state.keepScroll = true; render(); return; }
+  if (act === 'nbasort') { state.nbaSort = t.dataset.v; state.keepScroll = true; render(); return; }
   if (act === 'slwk') { if (t.dataset.p !== '') { state.slatePeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
   if (act === 'trend') { state.trend.mode = t.dataset.v; state.keepScroll = true; render(); return; }
   if (act === 'wk') { if (t.dataset.p !== '') { state.boardPeriod = +t.dataset.p; state.keepScroll = true; render(); } return; }
