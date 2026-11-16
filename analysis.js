@@ -1441,6 +1441,38 @@ export function injuryReport(m, my, basis) {
   return rows.sort((a, b) => b.mine - a.mine || value(b.p, basis) - value(a.p, basis));
 }
 
+// ---- Focus trade plan
+// Who to move for your focus matchups. Other managers pay for a whole season; you only
+// need your focus weeks. So the players to trade away are the ones worth more to them than
+// to you: few games in those weeks, games on nights your lineup is already full (benched),
+// or out injured. For each of your players: games in your focus weeks (started, benched,
+// missed injured), the points they add to your lineup there (vs the free agent who'd take
+// the spot), and trade value. `expect` is what a player of that trade value would add at
+// your roster's average rate, so add − expect < 0 means others value him more than you do.
+// Also each focus week's lineup fill and the nights with empty slots.
+export function focusTradePlan(m, my, basis) {
+  const fp = focusPeriods(m, my.id);
+  if (!fp) return null;
+  const tw = dayWeights(m, my.id, basis).sp;
+  const periodOf = new Map(fp.flatMap(id => daysLeft(m, id).map(sp => [sp, id])));
+  const days = [...periodOf.keys()].filter(sp => (tw.get(sp) ?? 1) > 0);
+  const base = projectDays(m, my.roster, days, basis, true, tw);
+  const weeks = fp.map(id => {
+    const d = base.days.filter(x => periodOf.get(x.sp) === id);
+    return { period: id, starts: d.reduce((a, x) => a + x.starters.length, 0), open: d.reduce((a, x) => a + x.open, 0), benched: d.reduce((a, x) => a + x.benched, 0) };
+  });
+  const openNights = base.days.filter(x => x.open > 0).map(x => ({ sp: x.sp, period: periodOf.get(x.sp), open: x.open }));
+  const players = my.roster.map(p => {
+    const t = base.players.get(p) || { g: 0, bench: 0, out: 0, avail: 0 };
+    const add = base.total - projectDays(m, my.roster.filter(q => q !== p), days, basis, false, tw).total;
+    return { p, games: t.avail + t.out, started: t.g, benched: t.bench, out: t.out, add, mv: Math.max(0, marketValue(m, p, basis)) };
+  });
+  const priced = players.filter(x => x.mv >= 5);
+  const rate = Math.max(0, priced.reduce((a, x) => a + x.add, 0)) / Math.max(1, priced.reduce((a, x) => a + x.mv, 0));
+  for (const x of players) { x.expect = x.mv * rate; x.surplus = x.add - x.expect; }
+  return { periods: fp, weeks, openNights, players, rate, days: days.length };
+}
+
 // ---- Matchups that matter
 // Your remaining regular-season matchups ranked by how much a win moves your playoff
 // odds, each with the free agent who'd add the most that week (who to stream for it).

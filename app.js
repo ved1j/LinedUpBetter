@@ -1326,6 +1326,58 @@ function vNeeds() {
   </section>`;
 }
 
+// Focus trade plan: who to move for your focus weeks, and the nights you need players for.
+const getFocusPlan = () => memo('fplan', () => A.focusTradePlan(state.model, state.an.my, state.settings.basis));
+function vFocusPlan() {
+  const { an, model: m } = state;
+  if (!focusLeft()) return `<p class="muted small fp-hint">Only playing for a few matchups? Pick them in <button class="link" data-act="focus-edit">Matchups → Focus matchups</button> and this tab builds a trade plan around those weeks.</p>`;
+  const plan = getFocusPlan();
+  if (!plan) return '';
+  const day = sp => `${A.fmtDow(A.spDate(m, sp))} ${A.fmtMD(A.spDate(m, sp))}`;
+  const weeks = plan.weeks.map(w => {
+    const o = oppIn(w.period);
+    return `<div class="fweek"><b>${wkName(w.period)}</b>${o ? ` <span class="muted">vs ${esc(o.name)}</span>` : ''}<span>${w.starts} starts</span><span class="${w.open ? 'down' : 'muted'}">${w.open} empty slot${w.open === 1 ? '' : 's'}</span><span class="${w.benched >= 3 ? 'warn' : 'muted'}">${w.benched} benched</span></div>`;
+  }).join('');
+  // Worth more to other managers than to your focus weeks, and worth something to them.
+  const sell = plan.players.filter(x => !isLocked(x.p.id) && x.mv >= 15 && x.surplus < -5 && !x.p.fill)
+    .sort((a, b) => a.surplus - b.surplus).slice(0, 5);
+  const perWk = plan.periods.length;
+  const why = x => {
+    const r = [];
+    if (x.out) r.push(x.out >= x.games ? `out for all ${x.games} of his games in those weeks` : `out for ${x.out} of his ${x.games} games in those weeks`);
+    if (x.benched >= 2 && x.benched >= 0.25 * x.games) r.push(`benched ${x.benched} of ${x.games}: your lineup's full those nights`);
+    if (x.games < 3.2 * perWk && x.out < x.games) r.push(`only ${x.games} game${x.games === 1 ? '' : 's'} in your focus weeks (${f1(x.games / perWk)} a week)`);
+    if (x.out < x.games && x.add <= 0) r.push('a free agent would do as well or better there');
+    else if (x.out < x.games && x.add < 0.3 * x.expect) r.push('a free agent would do almost as well there');
+    return r.join(' · ') || 'adds less there than his name is worth';
+  };
+  const rows = sell.map(x => `<tr><td>${pCell(x.p)}<div class="small muted">${why(x)}</div></td>
+      <td class="num">${x.games}</td><td class="num">${x.started}</td><td class="num ${x.benched ? 'warn' : 'muted'}">${x.benched}</td><td class="num ${x.out ? 'down' : 'muted'}">${x.out}</td>
+      <td class="num" title="What he adds to your lineup in your focus weeks, over the free agent who'd take his spot (below 0: the free agent would do better). A player with his trade value would add about ${f0(x.expect)} at your roster's rate.">${signed(x.add)} <span class="small muted">/ ~${f0(x.expect)}</span></td>
+      <td class="num">${f1(x.mv)}</td>
+      <td class="num"><button class="btn mini" data-act="faway" data-id="${x.p.id}">Find a return</button></td></tr>`).join('');
+  const keep = plan.players.filter(x => x.add > 0 && !x.p.fill).sort((a, b) => b.surplus - a.surplus).slice(0, 3);
+  // Nights with empty lineup slots, grouped by week.
+  const byWk = {};
+  for (const n of plan.openNights) (byWk[n.period] ||= []).push(n);
+  const open = Object.entries(byWk).map(([id, ns]) => `<div><b>${wkName(+id)}</b> <span class="small">${ns.map(n => `${day(n.sp)}${n.open > 1 ? ` <span class="muted">×${n.open}</span>` : ''}`).join(' · ')}</span></div>`).join('');
+  const sc = state.scan;
+  const targets = sc?.status === 'done' ? sc.targets.slice(0, 4).map(x => `<div class="pick">${pCell(x.p)}<div class="meta"><button class="tlink small" data-view="${x.owner.id}">${esc(x.owner.name)}</button><br>${f1(A.marketValue(m, x.p, state.settings.basis))}<small> trade value</small></div>
+      <div class="gain">${signed(x.gain)}</div><button class="btn mini" data-act="target" data-id="${x.p.id}">Find a deal</button></div>`).join('') : '';
+  return `<section class="card" id="focusplan"><h3>Focus trade plan <span class="r muted small">${plan.periods.map(wkName).join(', ')}</span></h3>
+    <p class="small" style="margin:0 0 12px">Other managers pay for a whole season, but you only need your focus weeks. Trade away players worth more to them than to you, for players who fill your empty nights in those weeks.</p>
+    <div class="rk-label">Your lineup in those weeks</div><div class="fweeks">${weeks}</div>
+    <div class="rk-label" style="margin-top:12px">Trade away</div>
+    ${rows ? `<div class="scrollx"><table><thead><tr><th>Player</th><th class="num" title="Games in your focus weeks">Focus G</th><th class="num" title="Games he'd start">Starts</th><th class="num" title="Games on your bench because the lineup's full that night">Benched</th><th class="num" title="Games missed injured">Out</th><th class="num" title="Points he adds to your lineup in your focus weeks / what his trade value would suggest">Adds / ~expected</th><th class="num" title="Trade value: name + form">Trade value</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="muted small">"Find a return" searches every team for the best deal measured on your focus weeks only.${an.my.roster.some(p => isLocked(p.id)) ? ' Players you marked 🔒 are left out.' : ''}</p>`
+      : '<p class="muted small">Nobody stands out: everyone other managers would pay for pulls their weight in your focus weeks.</p>'}
+    ${keep.length ? `<p class="small" style="margin:8px 0 0">Keep: <b>${keep.map(x => esc(x.p.name)).join(', ')}</b> <span class="muted">add the most in those weeks for what they'd fetch.</span></p>` : ''}
+    <div class="rk-label" style="margin-top:12px">Empty lineup slots to fill</div>
+    ${open ? `<div class="fopen">${open}</div><p class="muted small">A player with games on these nights adds the most. You can also stream for them once that week starts.</p>` : '<p class="muted small">None: your lineup is full every night of your focus weeks, so more games only help if they beat who you start.</p>'}
+    ${targets ? `<div class="rk-label" style="margin-top:12px">Go after <span class="muted">who'd add the most to your lineup in those weeks</span></div>${targets}` : sc?.status === 'done' ? '' : '<p class="muted small">Targets show up here after the league scan.</p>'}
+  </section>`;
+}
+
 function vTargets() {
   const sc = state.scan;
   if (!sc || sc.status !== 'done') return `<section class="card"><h3>Targets</h3><p class="muted small">Waiting for the league scan…</p></section>`;
@@ -1401,7 +1453,7 @@ function vTrade() {
   const bs = A.buySell(m, an.my.id, b);
   const bsRow = (x, act) => `<div class="pick">${pCell(x.p)}<div class="meta">${f1(x.p.stats.l15.avg)}<small> L15</small><br>${f1(x.p.stats.season.avg)}<small> season</small></div>
     <div class="gain ${x.d < 0 ? 'down' : ''}">${signed(x.d, 1)}</div>${act ? `<button class="btn mini" data-act="target" data-id="${x.p.id}" data-owner="${x.owner.id}">Target</button>` : ''}</div>`;
-  return `${vFinder()}${vTradeIdeas()}
+  return `${vFocusPlan()}${vFinder()}${vTradeIdeas()}
     <div class="grid2" id="analyzer">
       <section class="card"><h3>You give <span class="r">${esc(an.my.name)}</span></h3><div class="tlist">${pick(mine, 'give')}</div></section>
       <section class="card"><h3>You get <select class="tsel" data-act="partner">${others.map(t => `<option value="${t.id}" ${t.id === tr.partner ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>${partner ? `<span class="r"><button class="link" data-act="fteam" data-id="${partner.id}" title="Find the best deals with ${esc(partner.name)} in the trade finder">Find deals</button></span>` : ''}</h3><div class="tlist">${pick(theirs, 'get')}</div></section>
@@ -1534,7 +1586,7 @@ function vFocus(sched) {
   } else {
     top = `<p class="small" style="margin:0 0 12px">Only care about a few games, like the ones against the other weak teams? Pick them here or star weeks in the schedule below. Trades, trade ideas, waiver pickups, player worth and the Slate will then count only those weeks, and every other week counts for nothing, like a bye.${on.size ? ' <span class="muted">Your earlier picks are all played, so every week counts again.</span>' : ''}</p>`;
   }
-  return `<section class="card" id="focus"><h3>Focus matchups <span class="r muted small">${left ? `<button class="link" data-act="focus-clear">Turn off</button>` : 'play for the games you care about'}</span></h3>
+  return `<section class="card" id="focus"><h3>Focus matchups <span class="r muted small">${left ? `<button class="link" data-act="fplan">Who to trade away</button> · <button class="link" data-act="focus-clear">Turn off</button>` : 'play for the games you care about'}</span></h3>
     ${top}
     ${oppChips ? `<div class="rk-label">Every game left against</div><div class="chips">${oppChips}</div>` : ''}
     ${quick ? `<div class="rk-label">Quick picks</div><div class="chips">${quick}</div>` : ''}
@@ -1961,6 +2013,7 @@ document.addEventListener('click', async e => {
   }
   if (act === 'focus-set') { await setFocusList(t.dataset.ps.split(',').map(Number)); return; }
   if (act === 'focus-clear') { await setFocusList([]); return; }
+  if (act === 'fplan') { setTab('trade'); document.getElementById('focusplan')?.scrollIntoView({ block: 'start' }); return; }
   if (act === 'focus-edit') { setTab('matchups'); document.getElementById('focus')?.scrollIntoView({ block: 'start' }); return; }
   if (act === 'recap') {
     navigator.clipboard.writeText(recapText()).then(() => toast('Recap copied: paste it in your group chat'), () => toast('Couldn\'t copy. Try again.'));

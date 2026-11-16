@@ -38,6 +38,7 @@ Only care about a few games, like the ones against the other weak teams? In **Ma
 - The trade analyzer adds a table of your win chance in each focus matchup before and after the deal, plus the change in expected wins. If your trade partner is one of those opponents, their weaker or stronger roster counts too.
 - In a week that isn't a focus matchup, lineup advice stays (it's free), but streams and this-week waiver gains are switched off.
 - Focus is saved per league and team. A bar on the affected tabs shows what's on, with Edit and Turn off.
+- **Focus trade plan** (top of the Trade tab, or "Who to trade away" on the focus card): other managers pay for a whole season, but you only need your focus weeks. It shows your lineup in each focus week (starts, empty slots, benched games), the players to trade away (worth more to others than to you: few games in those weeks, benched because your lineup's full those nights, out injured, or a free agent would do as well), who to keep, the nights with empty lineup slots, and who to go after. "Find a return" searches every team for the best deal on your focus weeks.
 
 ## Teams, stars and notes
 - Use the team switcher in the header to see everything from any team's point of view.
