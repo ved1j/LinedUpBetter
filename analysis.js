@@ -242,6 +242,14 @@ export function fillLineup(players, slots, key = slots.join(',')) {
 // player, games started / benched / missed injured and points, and points per slot.
 // `w` (a team's dayWeights) scales each day's points by how much it counts for that
 // team: 0 on bye weeks, so those days are skipped entirely.
+// Games already underway today: the points so far are in the live score, and a starter
+// locked into your lineup still scores the rest of his game. That remainder is estimated
+// from the time since the scheduled tip (an NBA game runs about 2h20m start to finish).
+// Without it, projections dropped a game the moment it tipped off and win odds lurched
+// mid-slate depending on whose players were mid-game.
+const GAME_RUN_MS = 140 * 60e3;
+export const gameRest = (g, now = Date.now()) => (g?.start ? Math.max(0, Math.min(1, 1 - (now - g.start) / GAME_RUN_MS)) : 0);
+
 export function projectDays(m, roster, sps, basis, track = false, w = null) {
   const fills = openSpotFills(m, roster, sps, basis);
   if (fills.length) roster = [...roster, ...fills];
@@ -264,29 +272,38 @@ export function projectDays(m, roster, sps, basis, track = false, w = null) {
   });
   const players = track ? new Map(roster.map(p => [p, { g: 0, pts: 0, avail: 0, bench: 0, out: 0 }])) : null;
   const slotPts = track ? {} : null;
-  let total = 0, games = 0;
+  let total = 0, games = 0, liveGames = 0;
   const days = [];
   for (const sp of sps) {
     const wt = w ? w.get(sp) ?? 1 : 1;
     if (wt === 0 && !track) continue;
     const playing = [];
     const isToday = sp === m.currentSP, inCur = cur.has(sp);
+    let live = 0;
     for (const x of info) {
       const g = x.games[sp];
-      if (!g || (isToday && g.start && g.start <= now)) continue; // no game, or already tipped off
+      if (!g) continue;
+      // Already tipped off: only a starter locked into the lineup still scores (the rest of his game).
+      const started = isToday && g.start && g.start <= now;
+      if (started && !(x.p.slot != null && x.p.slot < 12)) continue;
       if (sp < x.join) continue; // assumed pickup not on the team yet
-      if (sp < x.backSP) { if (track) players.get(x.p).out++; continue; }
+      if (sp < x.backSP) { if (track && !started) players.get(x.p).out++; continue; }
       let v = x.v;
       if (x.dtd && inCur) v *= 0.8;
       if (u && x.team) v *= usageMult(m, u, x.team, x.me, sp);
       if (x.star && x.games[sp - 1]) v *= REST_FACTOR;
+      if (started) {
+        const rest = gameRest(g, now);
+        if (rest > 0) { live += v * rest; liveGames += rest; if (track) players.get(x.p).pts += v * rest; }
+        continue;
+      }
       playing.push({ p: x.p, v });
     }
     playing.sort((a, b) => b.v - a.v);
     const today = sp === m.currentSP;
     const daySlots = today ? slotsLeftToday(m, roster) : slots;
     const { used, owner } = fillLineup(playing, daySlots, today ? daySlots.join(',') : slotsKey);
-    const pts = used.reduce((a, x) => a + x.v, 0);
+    const pts = used.reduce((a, x) => a + x.v, 0) + live;
     total += pts * wt;
     if (wt > 0) games += used.length;
     if (track) {
@@ -300,13 +317,13 @@ export function projectDays(m, roster, sps, basis, track = false, w = null) {
       for (const x of playing) { const t = players.get(x.p); t.bench = t.avail - t.g; }
     }
     days.push({
-      sp, pts, starters: used.map(x => x.p),
+      sp, pts, live, starters: used.map(x => x.p),
       playing: playing.length,
       open: daySlots.length - used.length,
       benched: playing.length - used.length,
     });
   }
-  return { total, games, days, players, slotPts };
+  return { total, games, days, players, slotPts, live: liveGames };
 }
 
 // Open roster spots: a roster with fewer players than the league's roster spots (IR
@@ -444,7 +461,8 @@ export function lineupCheck(m, team, basis) {
     .sort((a, b) => idle(b) - idle(a) || v(a) - v(b))
     .slice(0, needSits);
   const why = p => (!gameOn(m, p, sp) ? 'no game today' : !availableOn(m, p, sp) ? 'out' : locked(p) ? 'locked' : 'weaker option');
-  return { gain: best.pts - current, start, sit, best: best.pts, current, why, intoOpen: start.length - needSits };
+  const bestLeft = best.pts - (best.live || 0); // games underway are locked either way
+  return { gain: bestLeft - current, start, sit, best: bestLeft, current, why, intoOpen: start.length - needSits };
 }
 
 // ---- Streaming plan: sequence of add/drop moves for the rest of the matchup
@@ -843,7 +861,7 @@ export function projectMatchup(m, period, home, away, basis, homePts = 0, awayPt
   const a = away ? projectDays(m, away.roster, days, basis) : { total: 0, games: 0 };
   const hp = homePts + h.total, ap = awayPts + a.total;
   // Uncertainty: ~12.5 FP per player-game of noise, plus ~6% for lineup/minutes changes.
-  const sd = Math.sqrt((h.games + a.games) * 160 + (0.06 * (h.total + a.total)) ** 2) + 5;
+  const sd = Math.sqrt((h.games + a.games + (h.live || 0) + (a.live || 0)) * 160 + (0.06 * (h.total + a.total)) ** 2) + 5;
   const winProb = days.length ? phi((hp - ap) / sd) : (hp > ap ? 1 : hp < ap ? 0 : 0.5);
   return { homeProj: hp, awayProj: ap, homeGames: h.games, awayGames: a.games, winProb, final: !days.length, homeDays: h.days, awayDays: a.days || [] };
 }
