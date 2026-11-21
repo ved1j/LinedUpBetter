@@ -225,7 +225,10 @@ function normalize(L, P, F, season, leagueId) {
     };
   });
 
-  const side = s => s && { teamId: s.teamId, pts: s.totalPointsLive ?? s.totalPoints ?? 0 };
+  const side = s => s && { teamId: s.teamId, pts: s.totalPointsLive ?? s.totalPoints ?? 0,
+    // Points per day (scoring period) so far, when ESPN sends them.
+    byDay: s.pointsByScoringPeriod && typeof s.pointsByScoringPeriod === 'object'
+      ? Object.fromEntries(Object.entries(s.pointsByScoringPeriod).map(([k, v]) => [+k, +v || 0])) : null };
   const matchups = (L.schedule || []).map(m => ({
     period: m.matchupPeriodId,
     home: side(m.home),

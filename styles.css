@@ -623,3 +623,16 @@ table.tlineup tfoot td { padding-top: 8px; }
 /* Slate: NBA schedule grid */
 table.nbaweek tr.mine td:first-child { box-shadow: inset 2px 0 0 var(--volt); }
 table.nbaweek td:first-child { white-space: nowrap; }
+
+/* Matchups: every matchup, day by day */
+.mdx { border: 1px solid var(--line-2); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.mdx.me { border-color: rgba(212, 255, 58, .45); }
+.mdx-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; margin-bottom: 6px; }
+.mdx-vs { font-family: var(--display); font-size: 13px; }
+.mdx-toggle { margin-left: auto; }
+table.mdx-days td.day { line-height: 1.25; }
+table.mdx-days td.dwin b, table.mdx-days td.dwin .small { color: var(--volt); }
+.mdx-open { display: block; width: 14px; height: 2px; margin: 2px auto 0; background: var(--bad); border-radius: 1px; }
+table.mdx-players tr.mdx-team td { font-family: var(--display); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: 11px; color: var(--muted); padding-top: 12px; }
+table.mdx-days { width: auto; min-width: 60%; }
+table.mdx-days td:first-child { min-width: 64px; }

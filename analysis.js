@@ -872,6 +872,7 @@ export function scoreboard(m, period, basis) {
   return m.matchups.filter(x => x.period === period && x.home).map(x => {
     const home = team(x.home.teamId), away = x.away && team(x.away.teamId);
     return { period, home, away, homePts: x.home.pts, awayPts: x.away?.pts ?? 0, winner: x.winner,
+      homeByDay: x.home.byDay || null, awayByDay: x.away?.byDay || null,
       ...projectMatchup(m, period, home, away, basis, x.home.pts, x.away?.pts ?? 0) };
   });
 }

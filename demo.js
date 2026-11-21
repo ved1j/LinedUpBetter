@@ -128,7 +128,15 @@ export function makeDemo() {
       } else if (wk === currentPeriod) {
         hp = Math.round(rand(330, 480)); ap = Math.round(rand(330, 480));
       }
-      matchups.push({ period: wk, home: { teamId: home, pts: hp }, away: { teamId: away, pts: ap }, winner });
+      // Points per day so far this week (deterministic split, so the rest of the demo doesn't change).
+      const split = (pts, tid) => {
+        const played = (wk === currentPeriod ? periods[wk] : []).filter(sp => sp < currentSP);
+        if (!played.length) return null;
+        const w = played.map(sp => 2 + ((sp * 7 + tid * 3) % 5));
+        const tot = w.reduce((a, b) => a + b, 0);
+        return Object.fromEntries(played.map((sp, i) => [sp, Math.round(pts * w[i] / tot)]));
+      };
+      matchups.push({ period: wk, home: { teamId: home, pts: hp, byDay: split(hp, home) }, away: { teamId: away, pts: ap, byDay: split(ap, away) }, winner });
     }
   }
 
